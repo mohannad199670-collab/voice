@@ -3,147 +3,217 @@ import telebot
 import requests
 import time
 import yt_dlp
+import re
+import language_tool_python
 
-# ===========================
-# قراءة المتغيرات من Koyeb
-# ===========================
+# =============[ المتغيرات ]=============
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 ASSEMBLYAI_API_KEY = os.getenv("ASSEMBLYAI_API_KEY")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
+tool = language_tool_python.LanguageTool('ar')  # مصحح لغوي عربي
 
 HEADERS = {
     "authorization": ASSEMBLYAI_API_KEY,
     "content-type": "application/json"
 }
 
-# ===========================
-# تنزيل صوت يوتيوب
-# ===========================
+user_text_memory = {}  # لحفظ النص مؤقتًا لكل مستخدم
+
+
+# =============[ قائمة الأوامر ]=============
+def menu_keyboard():
+    kb = telebot.types.InlineKeyboardMarkup()
+    kb.add(
+        telebot.types.InlineKeyboardButton("🎧 تفريغ صوت", callback_data="transcribe_audio"),
+        telebot.types.InlineKeyboardButton("📺 تفريغ يوتيوب", callback_data="transcribe_yt")
+    )
+    kb.add(
+        telebot.types.InlineKeyboardButton("✨ تلخيص النص", callback_data="summarize"),
+        telebot.types.InlineKeyboardButton("✏️ تصحيح النص", callback_data="correct")
+    )
+    kb.add(
+        telebot.types.InlineKeyboardButton("🗑️ حذف النص", callback_data="delete")
+    )
+    return kb
+
+
+@bot.message_handler(commands=['start', 'menu'])
+def start_cmd(message):
+    bot.send_message(
+        message.chat.id,
+        "👋 أهلاً بك! اختر ميزة من القائمة:",
+        reply_markup=menu_keyboard()
+    )
+
+
+# =============[ تنزيل صوت من يوتيوب ]=============
 def download_youtube_audio(url):
     try:
         ydl_opts = {
             "format": "bestaudio/best",
             "quiet": True,
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192"
+            }],
             "outtmpl": "audio.%(ext)s"
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
+            ydl.download([url])
 
-        return filename
+        return "audio.mp3"
+    except Exception as e:
+        print("Error:", e)
+        return None
+
+
+# =============[ رفع الصوت لـ AssemblyAI ]=============
+def upload_audio(filename):
+    try:
+        with open(filename, "rb") as f:
+            data = f.read()
+
+        res = requests.post(
+            "https://api.assemblyai.com/v2/upload",
+            headers={"authorization": ASSEMBLYAI_API_KEY},
+            data=data
+        )
+        return res.json().get("upload_url")
     except:
         return None
 
 
-# ===========================
-# رفع ملف الصوت إلى AssemblyAI
-# ===========================
-def upload_to_assemblyai(filename):
-    with open(filename, "rb") as f:
-        audio_data = f.read()
-
-    upload = requests.post(
-        "https://api.assemblyai.com/v2/upload",
-        headers={"authorization": ASSEMBLYAI_API_KEY},
-        data=audio_data
-    )
-
-    if upload.status_code == 200:
-        return upload.json()["upload_url"]
-
-    return None
-
-
-# ===========================
-# طلب التفريغ
-# ===========================
-def transcribe_audio(audio_url):
+# =============[ تفريغ صوت ]=============
+def transcribe(audio_url):
     data = {
         "audio_url": audio_url,
         "language_detection": True
     }
-
     res = requests.post(
         "https://api.assemblyai.com/v2/transcript",
-        headers=HEADERS,
-        json=data
+        json=data,
+        headers=HEADERS
     )
-
-    transcript_id = res.json()["id"]
+    tid = res.json()["id"]
 
     status = "queued"
     while status not in ["completed", "error"]:
         time.sleep(2)
-        result = requests.get(
-            f"https://api.assemblyai.com/v2/transcript/{transcript_id}",
+        check = requests.get(
+            f"https://api.assemblyai.com/v2/transcript/{tid}",
             headers=HEADERS
         ).json()
-        status = result["status"]
+        status = check["status"]
 
-    return result
+    return check if status == "completed" else None
 
 
-# ===========================
-# تلخيص النص
-# ===========================
+# =============[ تلخيص نص ]=============
 def summarize_text(text):
     data = {
         "text": text,
         "summarization_model": "informative",
         "max_output_size": 200
     }
-    res = requests.post("https://api.assemblyai.com/v2/summarize",
-                        json=data, headers=HEADERS).json()
+    res = requests.post(
+        "https://api.assemblyai.com/v2/summarize",
+        json=data,
+        headers=HEADERS
+    ).json()
+    return res.get("summary", "❌ لم يتم التلخيص")
 
-    return res.get("summary", "❌ لم يتم إنشاء الملخص")
+
+# =============[ تصحيح نص ]=============
+def correct_text(text):
+    matches = tool.check(text)
+    return language_tool_python.utils.correct(text, matches)
 
 
-# ===========================
-# استقبال رابط اليوتيوب
-# ===========================
-@bot.message_handler(func=lambda m: True)
-def handle_message(message):
-    text = message.text
+# =============[ استقبال صوت ]=============
+@bot.message_handler(content_types=['voice', 'audio'])
+def process_audio(message):
+    bot.reply_to(message, "🎧 جاري معالجة الصوت…")
 
-    # هل هو رابط يوتيوب؟
-    if text and ("youtube.com" in text or "youtu.be" in text):
-        bot.reply_to(message, "🎧 جاري تنزيل الصوت من اليوتيوب…")
+    file_id = message.voice.file_id if message.voice else message.audio.file_id
+    info = bot.get_file(file_id)
+    url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{info.file_path}"
 
-        filename = download_youtube_audio(text)
-        if not filename:
-            bot.reply_to(message, "❌ لم أستطع تنزيل الصوت من اليوتيوب")
-            return
+    content = requests.get(url).content
+    open("audio_user.mp3", "wb").write(content)
 
-        bot.reply_to(message, "📤 جاري رفع الصوت لـ AssemblyAI…")
+    audio_url = upload_audio("audio_user.mp3")
+    bot.send_message(message.chat.id, "⏳ جاري التفريغ…")
 
-        audio_url = upload_to_assemblyai(filename)
-        if not audio_url:
-            bot.reply_to(message, "❌ فشل رفع الملف")
-            return
-
-        bot.reply_to(message, "⏳ جاري التفريغ…")
-
-        result = transcribe_audio(audio_url)
-        if result["status"] == "error":
-            bot.reply_to(message, "❌ حدث خطأ أثناء التفريغ")
-            return
-
-        full_text = result["text"]
-
-        bot.send_message(message.chat.id, f"📝 النص الكامل:\n\n{full_text}")
-
-        summary = summarize_text(full_text)
-        bot.send_message(message.chat.id, f"✨ الملخص:\n\n{summary}")
-
+    result = transcribe(audio_url)
+    if not result:
+        bot.reply_to(message, "❌ حدث خطأ أثناء التفريغ")
         return
 
-    # أي رسالة عادية
-    bot.reply_to(message, "أرسل رابط يوتيوب للتفريغ.")
+    text = result["text"]
+    user_text_memory[message.chat.id] = text
+
+    bot.send_message(
+        message.chat.id,
+        f"📝 النص المستخرج:\n\n{text}",
+    )
 
 
-# ===========================
-# تشغيل البوت
-# ===========================
+# =============[ استقبال رابط يوتيوب ]=============
+@bot.message_handler(func=lambda m: m.text and ("youtube.com" in m.text or "youtu.be" in m.text))
+def yt_message(message):
+    url = message.text.strip()
+    bot.send_message(message.chat.id, "📥 جاري تحميل صوت اليوتيوب…")
+
+    filename = download_youtube_audio(url)
+    if not filename:
+        bot.reply_to(message, "❌ لم أستطع تنزيل الصوت")
+        return
+
+    bot.send_message(message.chat.id, "📤 جاري رفع الصوت…")
+    audio_url = upload_audio(filename)
+
+    bot.send_message(message.chat.id, "⏳ جاري التفريغ…")
+    result = transcribe(audio_url)
+
+    if not result:
+        bot.reply_to(message, "❌ فشل التفريغ")
+        return
+
+    text = result["text"]
+    user_text_memory[message.chat.id] = text
+
+    bot.send_message(message.chat.id, f"📝 النص:\n\n{text}")
+
+
+# =============[ أزرار القائمة ]=============
+@bot.callback_query_handler(func=lambda call: True)
+def menu_actions(call):
+    chat_id = call.message.chat.id
+
+    if call.data == "summarize":
+        if chat_id not in user_text_memory:
+            bot.send_message(chat_id, "⚠️ لا يوجد نص لتلخيصه")
+            return
+        summary = summarize_text(user_text_memory[chat_id])
+        bot.send_message(chat_id, f"✨ الملخص:\n\n{summary}")
+
+    elif call.data == "correct":
+        if chat_id not in user_text_memory:
+            bot.send_message(chat_id, "⚠️ لا يوجد نص لتصحيحه")
+            return
+        corrected = correct_text(user_text_memory[chat_id])
+        bot.send_message(chat_id, f"✏️ التصحيح:\n\n{corrected}")
+
+    elif call.data == "delete":
+        user_text_memory.pop(chat_id, None)
+        bot.send_message(chat_id, "🗑️ تم حذف النص من الذاكرة")
+
+    else:
+        bot.answer_callback_query(call.id, "اختر من القائمة")
+
+
+# =============[ تشغيل البوت ]=============
 bot.infinity_polling()
