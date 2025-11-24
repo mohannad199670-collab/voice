@@ -1,4 +1,5 @@
 import os
+import re
 import telebot
 import requests
 import yt_dlp
@@ -9,6 +10,9 @@ import yt_dlp
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 ASSEMBLYAI_API_KEY = os.getenv("ASSEMBLYAI_API_KEY")
 
+if not TELEGRAM_TOKEN or not ASSEMBLYAI_API_KEY:
+    raise RuntimeError("يجب ضبط TELEGRAM_TOKEN و ASSEMBLYAI_API_KEY في إعدادات Koyeb")
+
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
 # ------------------------------------
@@ -17,12 +21,11 @@ bot = telebot.TeleBot(TELEGRAM_TOKEN)
 WELCOME = (
     "👋✨ أهلاً وسهلاً بك في *بوت التفريغ الصوتي الاحترافي*!\n\n"
     "🎙️ *المميزات المتاحة:*\n"
-    "1️⃣ تفريغ الصوت العربي واللغات الأخرى تلقائياً\n"
-    "2️⃣ تفريغ روابط يوتيوب 🎥\n"
-    "3️⃣ تلخيص النص ✨\n\n"
-    "🔧 *اختر أمراً من الأسفل أو أرسل صوتاً مباشرة:*"
+    "1️⃣ تفريغ المقاطع الصوتية والرسائل الصوتية (يدعم العربية)\n"
+    "2️⃣ تفريغ الصوت من روابط يوتيوب 🎥\n"
+    "3️⃣ تلخيص النصوص 📝\n\n"
+    "🔧 اختر من الأزرار بالأسفل أو أرسل صوتاً مباشرة."
 )
-
 
 # ------------------------------------
 #  /start
@@ -41,146 +44,171 @@ def start(message):
     )
 
 # ------------------------------------
-#  دالة تفريغ بواسطة AssemblyAI
+#  دالة تفريغ الصوت عبر AssemblyAI (تستقبل بايتات الصوت)
 # ------------------------------------
-def transcribe_audio(audio_url):
+def transcribe_audio_bytes(audio_bytes):
     # رفع الصوت
-    upload = requests.post(
+    upload_resp = requests.post(
         "https://api.assemblyai.com/v2/upload",
         headers={"authorization": ASSEMBLYAI_API_KEY},
-        data=requests.get(audio_url).content
-    ).json()
+        data=audio_bytes
+    )
+    upload_resp.raise_for_status()
+    audio_url = upload_resp.json()["upload_url"]
 
-    audio_upload_url = upload["upload_url"]
-
-    # طلب التفريغ
-    task = requests.post(
+    # إنشاء مهمة التفريغ
+    task_resp = requests.post(
         "https://api.assemblyai.com/v2/transcript",
-        headers={"authorization": ASSEMBLYAI_API_KEY},
-        json={
-            "audio_url": audio_upload_url,
-            "language_detection": True,      # اكتشاف اللغة تلقائياً
-            "language_code": "ar",           # دعم العربية
-            "auto_chapters": False
-        }
-    ).json()
-
-    transcript_id = task["id"]
-
-    # انتظار انتهاء التفريغ
-    while True:
-        status = requests.get(
-            f"https://api.assemblyai.com/v2/transcript/{transcript_id}",
-            headers={"authorization": ASSEMBLYAI_API_KEY}
-        ).json()
-
-        if status["status"] == "completed":
-            return status["text"]
-
-        if status["status"] == "error":
-            return None
-
-
-# ------------------------------------
-#  تلخيص النص
-# ------------------------------------
-def summarize_text(text):
-    response = requests.post(
-        "https://api.assemblyai.com/v2/summarize",
         headers={
             "authorization": ASSEMBLYAI_API_KEY,
             "content-type": "application/json"
         },
         json={
-            "text": text,
-            "context": "general",
-            "sentences": 3
+            "audio_url": audio_url,
+            "language_detection": True  # اكتشاف اللغة تلقائياً (العربية وغيرها)
         }
-    ).json()
+    )
+    task_resp.raise_for_status()
+    transcript_id = task_resp.json()["id"]
 
-    return response.get("summary", None)
+    # انتظار انتهاء التفريغ
+    while True:
+        status_resp = requests.get(
+            f"https://api.assemblyai.com/v2/transcript/{transcript_id}",
+            headers={"authorization": ASSEMBLYAI_API_KEY}
+        )
+        status_resp.raise_for_status()
+        data = status_resp.json()
 
+        if data["status"] == "completed":
+            return data.get("text", "")
+
+        if data["status"] == "error":
+            return None
 
 # ------------------------------------
-#  تفريغ صوت (voice / audio)
+#  تلخيص نص بسيط (محلي بدون أي API)
+# ------------------------------------
+def summarize_text(text, max_sentences=3):
+    # تقسيم الجمل اعتماداً على علامات الوقف العربية والإنجليزية
+    sentences = re.split(r'(?<=[\.!\؟\?])\s+', text.strip())
+    sentences = [s for s in sentences if s.strip()]
+    if len(sentences) <= max_sentences:
+        return text
+    return " ".join(sentences[:max_sentences])
+
+# ------------------------------------
+#  /voice (اختياري للتوضيح)
+# ------------------------------------
+@bot.message_handler(commands=["voice"])
+def voice_cmd(message):
+    bot.reply_to(message, "🎤 أرسل الآن المقطع الصوتي أو الرسالة الصوتية التي تريد تفريغها.")
+
+# ------------------------------------
+#  معالجة المقاطع الصوتية والـ voice
 # ------------------------------------
 @bot.message_handler(content_types=['voice', 'audio'])
-def process_voice(message):
-    bot.reply_to(message, "⏳ جاري تحميل الصوت ومعالجته…")
+def handle_voice(message):
+    bot.reply_to(message, "⏳ جاري معالجة الصوت… انتظر قليلاً.")
 
+    # الحصول على ملف الصوت من تيليجرام
     file_id = message.voice.file_id if message.voice else message.audio.file_id
-    info = bot.get_file(file_id)
+    file_info = bot.get_file(file_id)
+    file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info.file_path}"
 
-    file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{info.file_path}"
+    audio_bytes = requests.get(file_url).content
 
-    text = transcribe_audio(file_url)
+    text = transcribe_audio_bytes(audio_bytes)
 
     if not text:
-        bot.reply_to(message, "❌ حدث خطأ أثناء التفريغ")
+        bot.reply_to(message, "❌ حدث خطأ أثناء التفريغ.")
         return
 
-    bot.reply_to(message, f"📝 النص المستخرج:\n{text}")
-
+    bot.reply_to(
+        message,
+        f"🎙 *مقطع صوتي*\n\nالنص المستخرج: 📝\n{text}",
+        parse_mode="Markdown"
+    )
 
 # ------------------------------------
-#  تفريغ رابط يوتيوب
+#  تفريغ رابط يوتيوب (دالة مشتركة)
 # ------------------------------------
-@bot.message_handler(regexp=r"(youtube\.com|youtu\.be)")
-def process_youtube(message):
+def process_youtube_url(message):
     url = message.text.strip()
 
     bot.reply_to(message, "⏳ جاري تحميل الصوت من يوتيوب…")
 
     try:
-        # استخراج الصوت
+        # تحميل أفضل مسار صوت فقط
         ydl_opts = {
-            'format': 'bestaudio/best',
-            'quiet': True,
-            'outtmpl': 'audio.mp3'
+            "format": "bestaudio/best",
+            "outtmpl": "yt_audio.%(ext)s",
+            "quiet": True,
+            "noplaylist": True,
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
 
-        audio_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{info.file_path}"
+        # قراءة الملف الصوتي كـ bytes
+        with open(filename, "rb") as f:
+            audio_bytes = f.read()
 
-        # لكن الطريقة الصحيحة: نرفع الملف بأنفسنا
-        audio_data = open("audio.mp3", "rb").read()
+        # تفريغ الصوت
+        text = transcribe_audio_bytes(audio_bytes)
 
-        upload = requests.post(
-            "https://api.assemblyai.com/v2/upload",
-            headers={"authorization": ASSEMBLYAI_API_KEY},
-            data=audio_data
-        ).json()
-
-        text = transcribe_audio(upload["upload_url"])
+        # حذف الملف بعد الاستخدام
+        try:
+            os.remove(filename)
+        except Exception:
+            pass
 
         if not text:
-            bot.reply_to(message, "❌ حدث خطأ أثناء تفريغ اليوتيوب")
+            bot.reply_to(message, "❌ حدث خطأ أثناء تفريغ رابط اليوتيوب.")
             return
 
-        bot.reply_to(message, f"📝 النص المستخرج:\n{text}")
+        bot.reply_to(
+            message,
+            f"🎥 *رابط يوتيوب*\n\nالنص المستخرج: 📝\n{text}",
+            parse_mode="Markdown"
+        )
 
     except Exception as e:
-        print(e)
-        bot.reply_to(message, "❌ لم أستطع معالجة رابط اليوتيوب")
+        print("YouTube error:", e)
+        bot.reply_to(message, "❌ لم أستطع معالجة رابط اليوتيوب. تأكد أن الرابط صحيح وحاول مرة أخرى.")
 
+# عندما يرسل المستخدم رابط يوتيوب مباشرة
+@bot.message_handler(regexp=r"(youtube\.com|youtu\.be)")
+def direct_youtube(message):
+    process_youtube_url(message)
+
+# عندما يضغط زر 🎥 تفريغ يوتيوب
+@bot.message_handler(func=lambda m: m.text == "🎥 تفريغ يوتيوب")
+def ask_youtube(message):
+    msg = bot.reply_to(message, "🔗 أرسل الآن رابط فيديو من يوتيوب:")
+    bot.register_next_step_handler(msg, process_youtube_url)
 
 # ------------------------------------
 #  تلخيص نص
 # ------------------------------------
-@bot.message_handler(func=lambda msg: msg.text == "📝 تلخيص نص")
-def ask_for_text(message):
-    bot.reply_to(message, "📄 أرسل النص الذي تريد تلخيصه:")
+@bot.message_handler(func=lambda m: m.text == "🎧 تفريغ صوت")
+def explain_voice(message):
+    bot.reply_to(message, "🎤 أرسل الآن مقطعاً صوتياً أو رسالة صوتية وسأقوم بتفريغه لك.")
 
-@bot.message_handler(func=lambda msg: True)
-def summarize_handler(message):
-    if message.reply_to_message and "أرسل النص" in message.reply_to_message.text:
-        summary = summarize_text(message.text)
-        if summary:
-            bot.reply_to(message, f"✨ ملخص النص:\n\n{summary}")
-        else:
-            bot.reply_to(message, "❌ حدث خطأ أثناء التلخيص")
+@bot.message_handler(func=lambda m: m.text == "📝 تلخيص نص")
+def ask_summary(message):
+    msg = bot.reply_to(message, "📄 أرسل النص الذي تريد تلخيصه:")
+    bot.register_next_step_handler(msg, do_summary)
+
+def do_summary(message):
+    text = message.text.strip()
+    if not text:
+        bot.reply_to(message, "⚠️ النص فارغ.")
+        return
+
+    summary = summarize_text(text)
+    bot.reply_to(message, f"✨ *ملخص النص:*\n\n{summary}", parse_mode="Markdown")
 
 # ------------------------------------
 #  تشغيل البوت
