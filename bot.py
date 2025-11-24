@@ -2,147 +2,134 @@ import os
 import telebot
 import requests
 import yt_dlp
-from io import BytesIO
 
-# ============================
-# متغيرات البيئة
-# ============================
+# -------------------------------
+# قراءة مفاتيح Koyeb
+# -------------------------------
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GLADIA_API_KEY = os.getenv("GLADIA_API_KEY")
-
-if not TELEGRAM_TOKEN or not GLADIA_API_KEY:
-    raise RuntimeError("يجب ضبط TELEGRAM_TOKEN و GLADIA_API_KEY داخل Koyeb")
+DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# ============================
-# رسالة الترحيب
-# ============================
+# -------------------------------
+# رسالة ترحيب
+# -------------------------------
 WELCOME = (
-    "👋 أهلاً بك في بوت التفريغ الصوتي (Gladia)!\n\n"
-    "🎧 المميزات:\n"
-    "• تفريغ الصوت من تيليجرام\n"
-    "• تفريغ الصوت من روابط يوتيوب\n"
-    "• يدعم العربية تلقائياً\n\n"
-    "🎤 أرسل صوتاً أو رابط يوتيوب الآن."
+    "👋 أهلاً بك في *بوت التفريغ الصوتي*!\n\n"
+    "🎙️ يدعم:\n"
+    "• تفريغ الرسائل الصوتية\n"
+    "• تفريغ الملفات الصوتية\n"
+    "• تفريغ صوت روابط يوتيوب\n"
+    "• دعم العربية واكتشاف اللغة تلقائياً\n\n"
+    "📌 اختر من الأزرار أو أرسل صوتاً."
 )
 
 @bot.message_handler(commands=["start"])
 def start(message):
-    bot.send_message(message.chat.id, WELCOME, parse_mode="Markdown")
+    kb = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row("🎧 تفريغ صوت")
+    kb.row("🎥 تفريغ يوتيوب")
+    bot.send_message(message.chat.id, WELCOME, reply_markup=kb, parse_mode="Markdown")
 
-
-# ============================
-# رفع الصوت إلى Gladia
-# ============================
-def transcribe_gladia(audio_bytes):
-    files = {
-        "audio": ("audio.mp3", audio_bytes, "audio/mpeg")
-    }
+# -------------------------------
+#  دالة تفريغ الصوت عبر Deepgram
+# -------------------------------
+def deepgram_transcribe(audio_bytes):
+    url = "https://api.deepgram.com/v1/listen"
+    
     headers = {
-        "x-gladia-key": GLADIA_API_KEY
-    }
-    data = {
-        "language_behaviour": "automatic single language",   # يكتشف العربية تلقائياً
-        "output_format": "json",
-        "enable_noise_reduction": True
+        "Authorization": f"Token {DEEPGRAM_API_KEY}",
+        "Content-Type": "audio/*"
     }
 
-    response = requests.post(
-        "https://api.gladia.io/audio/text/audio-transcription",
-        headers=headers,
-        files=files,
-        data=data
-    )
+    params = {
+        "smart_format": "true",
+        "punctuate": "true",
+        "language": "ar",  # العربية
+        "detect_language": "true"
+    }
 
-    try:
-        result = response.json()
-        text = result["result"]["transcription"]
-        return text
+    resp = requests.post(url, headers=headers, params=params, data=audio_bytes)
 
-    except Exception:
+    if resp.status_code != 200:
+        print("Deepgram error:", resp.text)
         return None
 
+    try:
+        return resp.json()["results"]["channels"][0]["alternatives"][0]["transcript"]
+    except:
+        return None
 
-# ============================
-# تفريغ صوت تيليجرام
-# ============================
-@bot.message_handler(content_types=["voice", "audio"])
-def tg_voice(message):
+# -------------------------------
+# معالجة الصوت من تيليجرام
+# -------------------------------
+@bot.message_handler(content_types=['voice', 'audio'])
+def handle_voice(message):
     bot.reply_to(message, "⏳ جاري معالجة الصوت…")
 
     file_id = message.voice.file_id if message.voice else message.audio.file_id
-    info = bot.get_file(file_id)
-    file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{info.file_path}"
+    file_info = bot.get_file(file_id)
+    file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info.file_path}"
 
     audio_bytes = requests.get(file_url).content
-    text = transcribe_gladia(audio_bytes)
+
+    text = deepgram_transcribe(audio_bytes)
 
     if not text:
         bot.reply_to(message, "❌ حدث خطأ أثناء التفريغ.")
         return
 
-    bot.reply_to(message, f"📝 *النص المستخرج:* \n{text}", parse_mode="Markdown")
+    bot.reply_to(message, f"📝 النص المستخرج:\n\n{text}")
 
-
-# ============================
-# تفريغ رابط يوتيوب (بدون ملفات)
-# ============================
+# -------------------------------
+# تفريغ روابط يوتيوب (بدون تحميل ملف ضخم)
+# -------------------------------
 def process_youtube(message):
     url = message.text.strip()
-    bot.reply_to(message, "🎥 جاري استخراج الصوت من يوتيوب…")
+    bot.reply_to(message, "⏳ جاري استخراج الصوت من يوتيوب…")
 
     try:
-        buffer = BytesIO()
-
         ydl_opts = {
-            "format": "bestaudio/best",
+            "format": "bestaudio",
             "quiet": True,
             "noplaylist": True,
-            "outtmpl": "-",  # مهم (لا ملفات)
-            "forcejson": False,
-            "nocheckcertificate": True,
-            "postprocessors": [{
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "192"
-            }],
-            "progress_hooks": [
-                lambda d: buffer.write(open(d["filename"], "rb").read())
-                if d.get("status") == "finished" else None
-            ]
+            "extract_flat": False,
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+            info = ydl.extract_info(url, download=False)
+            audio_url = info["url"]
 
-        audio_bytes = buffer.getvalue()
-
-        if not audio_bytes:
-            bot.reply_to(message, "❌ لم أستطع استخراج الصوت من يوتيوب.")
-            return
-
-        bot.reply_to(message, "⏳ جاري التفريغ…")
-
-        text = transcribe_gladia(audio_bytes)
+        audio_bytes = requests.get(audio_url).content
+        text = deepgram_transcribe(audio_bytes)
 
         if not text:
-            bot.reply_to(message, "❌ حدث خطأ أثناء التفريغ من Gladia.")
+            bot.reply_to(message, "❌ لم أستطع تفريغ الرابط.")
             return
 
-        bot.reply_to(message, f"📝 *النص المستخرج:* \n{text}", parse_mode="Markdown")
+        bot.reply_to(message, f"🎥 *نص يوتيوب المستخرج:*\n\n{text}", parse_mode="Markdown")
 
     except Exception as e:
-        print("YouTube ERROR:", e)
-        bot.reply_to(message, "❌ لم أستطع معالجة رابط اليوتيوب. جرب رابطاً آخر.")
+        print("YouTube error:", e)
+        bot.reply_to(message, "❌ لم أستطع معالجة رابط يوتيوب.")
 
+@bot.message_handler(func=lambda m: m.text == "🎥 تفريغ يوتيوب")
+def ask_yt(message):
+    msg = bot.reply_to(message, "🔗 أرسل رابط فيديو يوتيوب:")
+    bot.register_next_step_handler(msg, process_youtube)
 
-# استقبال روابط يوتيوب مباشرة
 @bot.message_handler(regexp=r"(youtu\.be|youtube\.com)")
-def yt_handler(message):
+def direct_yt(message):
     process_youtube(message)
 
-# ============================
+# -------------------------------
+# زر تفريغ صوت
+# -------------------------------
+@bot.message_handler(func=lambda m: m.text == "🎧 تفريغ صوت")
+def ask_voice(message):
+    bot.reply_to(message, "🎤 أرسل المقطع الصوتي الآن.")
+
+# -------------------------------
 # تشغيل البوت
-# ============================
+# -------------------------------
 bot.infinity_polling()
