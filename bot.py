@@ -5,7 +5,7 @@ import requests
 import yt_dlp
 
 # ------------------------------------
-# قراءة المتغيرات من Koyeb
+#  قراءة المتغيرات من Koyeb
 # ------------------------------------
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 ASSEMBLYAI_API_KEY = os.getenv("ASSEMBLYAI_API_KEY")
@@ -15,16 +15,20 @@ if not TELEGRAM_TOKEN or not ASSEMBLYAI_API_KEY:
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# رسالة ترحيب
+# ------------------------------------
+#  رسالة ترحيب
+# ------------------------------------
 WELCOME = (
     "👋✨ أهلاً وسهلاً بك في *بوت التفريغ الصوتي الاحترافي*!\n\n"
-    "🎙️ *المميزات:*\n"
-    "1️⃣ تفريغ الرسائل الصوتية والمقاطع (يدعم العربية)\n"
-    "2️⃣ تفريغ الصوت من يوتيوب 🎥 — بدون أي ملفات\n\n"
+    "🎙️ *المميزات المتاحة:*\n"
+    "1️⃣ تفريغ المقاطع الصوتية والرسائل الصوتية (يدعم العربية)\n"
+    "2️⃣ تفريغ الصوت من روابط يوتيوب 🎥\n\n"
     "🔧 اختر من الأزرار بالأسفل أو أرسل صوتاً مباشرة."
 )
 
-# /start
+# ------------------------------------
+#  /start
+# ------------------------------------
 @bot.message_handler(commands=["start"])
 def start(message):
     markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -38,20 +42,18 @@ def start(message):
     )
 
 # ------------------------------------
-#  دالة تفريغ الصوت عبر AssemblyAI
+#  دالة تفريغ الصوت عبر AssemblyAI (تستقبل بايتات الصوت)
 # ------------------------------------
 def transcribe_audio_bytes(audio_bytes):
-    # رفع الملف
-    upload = requests.post(
+    upload_resp = requests.post(
         "https://api.assemblyai.com/v2/upload",
         headers={"authorization": ASSEMBLYAI_API_KEY},
         data=audio_bytes
     )
-    upload.raise_for_status()
-    audio_url = upload.json()["upload_url"]
+    upload_resp.raise_for_status()
+    audio_url = upload_resp.json()["upload_url"]
 
-    # إنشاء مهمة تفريغ
-    transcript = requests.post(
+    task_resp = requests.post(
         "https://api.assemblyai.com/v2/transcript",
         headers={
             "authorization": ASSEMBLYAI_API_KEY,
@@ -62,18 +64,16 @@ def transcribe_audio_bytes(audio_bytes):
             "language_detection": True
         }
     )
+    task_resp.raise_for_status()
+    transcript_id = task_resp.json()["id"]
 
-    transcript.raise_for_status()
-    tid = transcript.json()["id"]
-
-    # انتظار النتيجة
     while True:
-        status = requests.get(
-            f"https://api.assemblyai.com/v2/transcript/{tid}",
+        status_resp = requests.get(
+            f"https://api.assemblyai.com/v2/transcript/{transcript_id}",
             headers={"authorization": ASSEMBLYAI_API_KEY}
         )
-        status.raise_for_status()
-        data = status.json()
+        status_resp.raise_for_status()
+        data = status_resp.json()
 
         if data["status"] == "completed":
             return data.get("text", "")
@@ -82,11 +82,11 @@ def transcribe_audio_bytes(audio_bytes):
             return None
 
 # ------------------------------------
-#  زر تفريغ صوت
+#  تفريغ صوت (زر)
 # ------------------------------------
 @bot.message_handler(func=lambda m: m.text == "🎧 تفريغ صوت")
 def ask_voice(message):
-    bot.reply_to(message, "🎤 أرسل الآن المقطع الصوتي أو الرسالة الصوتية.")
+    bot.reply_to(message, "🎤 أرسل الآن مقطعاً صوتياً أو رسالة صوتية وسأقوم بتفريغه.")
 
 # ------------------------------------
 #  معالجة المقاطع الصوتية
@@ -97,10 +97,9 @@ def handle_voice(message):
 
     file_id = message.voice.file_id if message.voice else message.audio.file_id
     file_info = bot.get_file(file_id)
-    url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info.file_path}"
+    file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info.file_path}"
 
-    audio_bytes = requests.get(url).content
-
+    audio_bytes = requests.get(file_url).content
     text = transcribe_audio_bytes(audio_bytes)
 
     if not text:
@@ -109,56 +108,54 @@ def handle_voice(message):
 
     bot.reply_to(
         message,
-        f"🎙 *مقطع صوتي*\n\n📝 النص المستخرج:\n{text}",
+        f"🎙 *مقطع صوتي*\n\nالنص المستخرج: 📝\n{text}",
         parse_mode="Markdown"
     )
 
 # ------------------------------------
-#  دالة تفريغ يوتيوب بدون ملفات
+#  تفريغ رابط يوتيوب
 # ------------------------------------
 def process_youtube_url(message):
     url = message.text.strip()
-
     bot.reply_to(message, "⏳ جاري تحميل الصوت من يوتيوب…")
 
     try:
         ydl_opts = {
             "format": "bestaudio/best",
+            "outtmpl": "yt_audio.%(ext)s",
             "quiet": True,
-            "noplaylist": True
+            "noplaylist": True,
         }
 
-        # استخراج معلومات الصوت بدون تنزيل
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
 
-        # رابط مباشر لمسار الصوت
-        audio_url = info.get("url")
-        if not audio_url:
-            bot.reply_to(message, "❌ لم أستطع الحصول على رابط الصوت.")
-            return
+        with open(filename, "rb") as f:
+            audio_bytes = f.read()
 
-        # تحميل الصوت مباشرة في الذاكرة
-        audio_bytes = requests.get(audio_url).content
-
-        # تفريغ النص
         text = transcribe_audio_bytes(audio_bytes)
 
+        try:
+            os.remove(filename)
+        except Exception:
+            pass
+
         if not text:
-            bot.reply_to(message, "❌ حدث خطأ أثناء التفريغ.")
+            bot.reply_to(message, "❌ حدث خطأ أثناء تفريغ رابط اليوتيوب.")
             return
 
         bot.reply_to(
             message,
-            f"🎥 *تفريغ يوتيوب*\n\n📝 النص المستخرج:\n{text}",
+            f"🎥 *رابط يوتيوب*\n\nالنص المستخرج: 📝\n{text}",
             parse_mode="Markdown"
         )
 
     except Exception as e:
-        print("YouTube Error:", e)
-        bot.reply_to(message, "❌ لم أستطع معالجة رابط اليوتيوب. تأكد من أنه صحيح.")
+        print("YouTube error:", e)
+        bot.reply_to(message, "❌ لم أستطع معالجة رابط اليوتيوب. تأكد من صحة الرابط وحاول مرة أخرى.")
 
-# استقبال روابط يوتيوب مباشرة
+# التقاط الروابط مباشرة
 @bot.message_handler(regexp=r"(youtube\.com|youtu\.be)")
 def direct_youtube(message):
     process_youtube_url(message)
@@ -166,10 +163,10 @@ def direct_youtube(message):
 # زر تفريغ يوتيوب
 @bot.message_handler(func=lambda m: m.text == "🎥 تفريغ يوتيوب")
 def ask_youtube(message):
-    msg = bot.reply_to(message, "🔗 أرسل رابط فيديو من يوتيوب:")
+    msg = bot.reply_to(message, "🔗 أرسل رابط اليوتيوب الآن:")
     bot.register_next_step_handler(msg, process_youtube_url)
 
 # ------------------------------------
-# تشغيل البوت
+#  تشغيل البوت
 # ------------------------------------
 bot.infinity_polling()
