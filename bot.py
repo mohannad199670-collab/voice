@@ -18,7 +18,7 @@ HEADERS = {
     "content-type": "application/json"
 }
 
-user_text_memory = {}  # لحفظ النص مؤقتًا لكل مستخدم
+user_text_memory = {}  # ذاكرة النصوص للمستخدمين
 
 
 # =============[ قائمة الأوامر ]=============
@@ -38,12 +38,25 @@ def menu_keyboard():
     return kb
 
 
+# =============[ رسالة الترحيب ]=============
 @bot.message_handler(commands=['start', 'menu'])
 def start_cmd(message):
+    welcome = (
+        "👋✨ <b>أهلاً وسهلاً بك في بوت التفريغ الصوتي واليوتيوب!</b>\n\n"
+        "🎧 <b>هذا البوت يساعدك في:</b>\n"
+        "• تفريغ المقاطع الصوتية بدقة عالية\n"
+        "• استخراج النص من روابط اليوتيوب تلقائياً\n"
+        "• تلخيص النصوص الطويلة ✨\n"
+        "• تصحيح الأخطاء الإملائية والنحوية ✏️\n"
+        "• حذف النصوص وإدارتها بسهولة 🗑️\n\n"
+        "🔽 <b>اختر ما تريد فعله من القائمة:</b>"
+    )
+
     bot.send_message(
         message.chat.id,
-        "👋 أهلاً بك! اختر ميزة من القائمة:",
-        reply_markup=menu_keyboard()
+        welcome,
+        reply_markup=menu_keyboard(),
+        parse_mode="HTML"
     )
 
 
@@ -155,10 +168,7 @@ def process_audio(message):
     text = result["text"]
     user_text_memory[message.chat.id] = text
 
-    bot.send_message(
-        message.chat.id,
-        f"📝 النص المستخرج:\n\n{text}",
-    )
+    bot.send_message(message.chat.id, f"📝 النص المستخرج:\n\n{text}")
 
 
 # =============[ استقبال رابط يوتيوب ]=============
@@ -169,7 +179,7 @@ def yt_message(message):
 
     filename = download_youtube_audio(url)
     if not filename:
-        bot.reply_to(message, "❌ لم أستطع تنزيل الصوت")
+        bot.reply_to(message, "❌ فشل تنزيل الصوت")
         return
 
     bot.send_message(message.chat.id, "📤 جاري رفع الصوت…")
