@@ -4,7 +4,7 @@ import os
 import json
 import time
 import requests
-from deepgram import DeepgramClient
+from deepgram import Deepgram
 
 # ==========================
 # المتغيرات من Koyeb
@@ -17,7 +17,7 @@ if not BOT_TOKEN or not DEEPGRAM_API_KEY:
     raise RuntimeError("❌ يجب ضبط BOT_TOKEN و DEEPGRAM_API_KEY في إعدادات Koyeb")
 
 bot = telebot.TeleBot(BOT_TOKEN)
-dg = DeepgramClient(DEEPGRAM_API_KEY)
+dg = Deepgram(DEEPGRAM_API_KEY)
 
 # ملف المستخدمين
 DATA_FILE = "users.json"
@@ -44,19 +44,16 @@ def main_menu():
     return menu
 
 # ==========================
-# زر طرق الدفع (مع تعديل بايير)
+# طرق الدفع (بايير بدون سمايل)
 # ==========================
 def payment_keyboard():
     kb = types.InlineKeyboardMarkup()
     kb.add(
         types.InlineKeyboardButton("USDT (TRC20) 🔥", callback_data="pay_usdt"),
-        types.InlineKeyboardButton("بايير", callback_data="pay_payeer")    # ← السمايل محذوف كما طلبت
+        types.InlineKeyboardButton("بايير", callback_data="pay_payeer")
     )
     return kb
 
-# ==========================
-# رسالة الدفع
-# ==========================
 USDT_ADDR = "TRWu3vC1GRDwbEymaiPNjXbpUw4wmwSRYa"
 PAYEER_ADDR = "P1058635648"
 
@@ -69,7 +66,7 @@ def payment_message():
     )
 
 # ==========================
-# استقبال الأوامر
+# /start
 # ==========================
 @bot.message_handler(commands=["start"])
 def start(message):
@@ -89,7 +86,7 @@ def start(message):
     )
 
 # ==========================
-# قائمة الاشتراكات
+# الاشتراكات
 # ==========================
 @bot.message_handler(func=lambda m: m.text == "📄 الاشتراكات")
 def subs(message):
@@ -146,7 +143,7 @@ def settings(message):
     )
 
 # ==========================
-# إضافة وقت للمستخدم
+# إضافة وقت
 # ==========================
 @bot.message_handler(commands=["add_time"])
 def addtime(message):
@@ -171,20 +168,17 @@ def addtime(message):
     bot.reply_to(message, f"✔ تمت إضافة {mins} دقيقة للمستخدم.")
 
 # ==========================
-# استقبال الصوت
+# استقبال الصوت + التفريغ
 # ==========================
 @bot.message_handler(content_types=["voice"])
 def voice_handler(message):
     user_id = str(message.from_user.id)
     users = load_users()
 
-    # حساب الوقت
     duration = message.voice.duration
-
-    free_limit = 120  # دقيقتان
+    free_limit = 120
     paid = users[user_id]["paid"]
     used = users[user_id]["used"]
-
     available = free_limit + paid - used
 
     if duration > available:
@@ -192,47 +186,43 @@ def voice_handler(message):
 
     bot.reply_to(message, "⏳ جاري التفريغ...")
 
-    # تحميل الملف
+    # تحميل الصوت
     file_info = bot.get_file(message.voice.file_id)
     file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
-    audio_data = requests.get(file_url).content
+    audio = requests.get(file_url).content
 
-    # ================================
-    # ⭐ التفريغ مع اكتشاف اللغة ⭐
-    # ================================
+    # ========= Deepgram =========
     try:
-        response = dg.transcription.sync_prerecorded(
+        response = dg.transcription.prerecorded(
             {
-                "buffer": audio_data,
+                "buffer": audio,
                 "mimetype": "audio/ogg"
             },
             {
-                "model": "nova-2-general",
-                "smart_format": True,
-                "detect_language": True,    # 🔥 اكتشاف اللغة
-                "multilingual": True       # 🔥 يدعم العربية + أي لغة
+                "punctuate": True,
+                "model": "general",
+                "language": "ar",
+                "detect_language": True,
+                "multilingual": True
             }
         )
 
         text = response["results"]["channels"][0]["alternatives"][0]["transcript"]
 
     except Exception as e:
-        bot.reply_to(message, "❌ حدث خطأ أثناء التفريغ.")
+        bot.reply_to(message, "❌ خطأ أثناء التفريغ.")
         print("Deepgram Error:", e)
         return
+    # ============================
 
-    # تحديث الوقت
     users[user_id]["used"] += duration
     save_users(users)
 
     bot.send_message(
         message.chat.id,
         f"📄 النص المستخرج:\n{text}\n\n"
-        f"⏱ تم احتساب:\n"
-        f"• من المجاني: {min(duration, free_limit)} ثانية\n"
-        f"• من المدفوع: {max(0, duration - free_limit)} ثانية"
+        f"⏱ تم احتساب {duration} ثانية"
     )
-
 
 # ==========================
 # تشغيل البوت
