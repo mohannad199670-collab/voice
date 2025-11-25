@@ -8,11 +8,11 @@ from telebot import types
 # المتغيرات من Koyeb
 # ==========================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-GLADIA_API_KEY = os.getenv("GLADIA_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # مثال: 604494923
 
-if not BOT_TOKEN or not GLADIA_API_KEY:
-    raise RuntimeError("❌ يجب ضبط BOT_TOKEN و GLADIA_API_KEY في إعدادات Koyeb")
+if not BOT_TOKEN or not OPENAI_API_KEY:
+    raise RuntimeError("❌ يجب ضبط BOT_TOKEN و OPENAI_API_KEY في إعدادات Koyeb")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -85,36 +85,21 @@ PAYEER_MESSAGE = (
     "بعد الدفع يرجى إرسال لقطة شاشة."
 )
 
+
 # ==========================
-# رسالة ترحيب /start
+# /start
 # ==========================
 @bot.message_handler(commands=["start"])
-def cmd_start(message: telebot.types.Message):
+def cmd_start(message):
     uid = str(message.from_user.id)
     username = message.from_user.username or ""
-    users = ensure_user(uid, username)
-
-    users = load_users()
-    users[uid]["username"] = username
-    save_users(users)
-
-    if ADMIN_ID:
-        try:
-            bot.send_message(
-                ADMIN_ID,
-                f"📥 مستخدم جديد /start\n"
-                f"🆔 ID: <code>{uid}</code>\n"
-                f"👤 Username: @{username}" if username else "👤 لا يوجد Username",
-                parse_mode="HTML",
-            )
-        except:
-            pass
+    ensure_user(uid, username)
 
     bot.send_message(
         message.chat.id,
         "👋 أهلاً بك في الأسطورة للتفريغ الصوتي!\n\n"
-        "🎙 يدعم العربية واكتشاف اللغة تلقائيًا.\n"
-        "🎁 لديك دقيقتان مجانًا للتجربة.\n\n"
+        "🎙 يدعم العربية 100%.\n"
+        "🎁 لديك 120 ثانية مجانية للتجربة.\n\n"
         "اختر من الأزرار بالأسفل أو أرسل مقطعًا صوتيًا مباشرة.",
         reply_markup=main_menu(),
     )
@@ -126,31 +111,34 @@ def cmd_start(message: telebot.types.Message):
 @bot.message_handler(func=lambda m: m.text == "📄 الاشتراكات")
 def show_plans(message):
     kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("🕐 باقة 60 دقيقة – 5$", callback_data="plan_60"))
-    kb.add(types.InlineKeyboardButton("🕑 باقة 120 دقيقة – 9$", callback_data="plan_120"))
-    kb.add(types.InlineKeyboardButton("🕔 باقة 300 دقيقة – 20$", callback_data="plan_300"))
+    kb.add(types.InlineKeyboardButton("🕐 60 دقيقة – 5$", callback_data="plan_60"))
+    kb.add(types.InlineKeyboardButton("🕑 120 دقيقة – 9$", callback_data="plan_120"))
+    kb.add(types.InlineKeyboardButton("🕔 300 دقيقة – 20$", callback_data="plan_300"))
 
-    bot.send_message(message.chat.id, "💳 اختر الباقة المناسبة لك:", reply_markup=kb)
+    bot.send_message(message.chat.id, "💳 اختر الباقة:", reply_markup=kb)
 
-@bot.callback_query_handler(func=lambda c: c.data in ("plan_60", "plan_120", "plan_300"))
-def on_plan_selected(call):
-    texts = {
-        "plan_60": "اخترت باقة 60 دقيقة مقابل 5$.\n\nاختر طريقة الدفع:",
-        "plan_120": "اخترت باقة 120 دقيقة مقابل 9$.\n\nاختر طريقة الدفع:",
-        "plan_300": "اخترت باقة 300 دقيقة مقابل 20$.\n\nاختر طريقة الدفع:",
-    }
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("plan_"))
+def plan_selected(call):
+    msg = {
+        "plan_60": "اخترت 60 دقيقة – 5$.\n\nاختر طريقة الدفع:",
+        "plan_120": "اخترت 120 دقيقة – 9$.\n\nاختر طريقة الدفع:",
+        "plan_300": "اخترت 300 دقيقة – 20$.\n\nاختر طريقة الدفع:",
+    }[call.data]
 
     bot.edit_message_text(
-        texts[call.data],
+        msg,
         call.message.chat.id,
         call.message.message_id,
         reply_markup=payment_keyboard(),
     )
 
+
 @bot.callback_query_handler(func=lambda c: c.data == "pay_usdt")
 def pay_usdt(call):
     bot.answer_callback_query(call.id)
     bot.send_message(call.message.chat.id, USDT_MESSAGE)
+
 
 @bot.callback_query_handler(func=lambda c: c.data == "pay_payeer")
 def pay_payeer(call):
@@ -164,27 +152,22 @@ def pay_payeer(call):
 @bot.message_handler(func=lambda m: m.text == "⚙️ الإعدادات")
 def admin_panel(message):
     if message.from_user.id != ADMIN_ID:
-        return bot.send_message(message.chat.id, "❌ غير مسموح لك بالدخول هنا.")
+        return bot.reply_to(message, "❌ ليس لديك صلاحية.")
 
     users = load_users()
-    total_users = len(users)
-    total_used = sum(u["used"] for u in users.values())
-    total_paid = sum(u["paid"] for u in users.values())
-
     bot.send_message(
         message.chat.id,
-        f"🛠 لوحة تحكم الأدمن\n\n"
-        f"👥 عدد المستخدمين: {total_users}\n"
-        f"⏱ إجمالي الوقت المستخدم: {total_used} ثانية\n"
-        f"🎁 إجمالي الوقت المدفوع المتبقي: {total_paid} ثانية\n\n"
-        "لإضافة وقت:\n"
-        "<code>/add_time user_id دقائق</code>",
-        parse_mode="HTML",
+        f"👥 المستخدمون: {len(users)}\n"
+        f"⏱ الوقت المستخدم: {sum(u['used'] for u in users.values())}\n"
+        f"🎁 الوقت المدفوع المتبقي: {sum(u['paid'] for u in users.values())}",
     )
 
 
+# ==========================
+# إضافة وقت
+# ==========================
 @bot.message_handler(commands=["add_time"])
-def cmd_add_time(message):
+def add_time(message):
     if message.from_user.id != ADMIN_ID:
         return
 
@@ -192,134 +175,90 @@ def cmd_add_time(message):
         _, uid, minutes = message.text.split()
         minutes = int(minutes)
     except:
-        return bot.reply_to(
-            message,
-            "❌ صيغة خاطئة.\n<code>/add_time user_id دقائق</code>",
-            parse_mode="HTML",
-        )
+        return bot.reply_to(message, "❌ الصيغة: /add_time user_id دقائق")
 
     users = load_users()
     if uid not in users:
-        return bot.reply_to(message, "❌ المستخدم غير موجود.")
+        return bot.reply_to(message, "❌ غير موجود.")
 
     users[uid]["paid"] += minutes * 60
     save_users(users)
 
-    bot.reply_to(
-        message,
-        f"✔ تمت إضافة {minutes} دقيقة.\n"
-        f"الوقت الجديد: {users[uid]['paid']} ثانية.",
-    )
+    bot.reply_to(message, f"✔ تمت إضافة {minutes} دقيقة.")
 
 
 # ==========================
-# Gladia – تفريغ الصوت
+# 🔥 تفريغ الصوت باستخدام OpenAI Whisper
 # ==========================
-def transcribe_audio(audio_bytes: bytes, ext: str, mime: str):
-    url = "https://api.gladia.io/audio/text/audio-transcription/"
-
-    headers = {
-        "x-gladia-key": GLADIA_API_KEY
-    }
+def transcribe_openai(audio_bytes: bytes):
+    url = "https://api.openai.com/v1/audio/transcriptions"
 
     files = {
-        "audio": (f"audio.{ext}", audio_bytes, mime)
+        "file": ("audio.mp3", audio_bytes, "audio/mpeg"),
+        "model": (None, "whisper-1"),
+        "response_format": (None, "text"),
     }
 
-    data = {
-        "language_behaviour": "auto",
-        "language": "ar",
-        "toggle_diarization": "false",
-        "toggle_noise_reduction": "true",
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}"
     }
 
     try:
-        r = requests.post(url, headers=headers, data=data, files=files)
-        result = r.json()
-        return result["result"]["transcription"]
+        r = requests.post(url, headers=headers, files=files)
+        return r.text
     except Exception as e:
-        print("Gladia error:", e)
+        print("OpenAI error:", e)
         return None
 
 
 # ==========================
 # 🎧 تفريغ صوت
 # ==========================
-FREE_LIMIT = 120  # 120 ثانية مجانا
+FREE_LIMIT = 120
 
 @bot.message_handler(func=lambda m: m.text == "🎧 تفريغ صوت")
-def explain_voice(message):
-    bot.reply_to(
-        message,
-        "🎙 أرسل الآن مقطعًا صوتيًا أو ملفًا صوتيًا.\n"
-        "🎁 لديك 120 ثانية مجانية."
-    )
+def explain(message):
+    bot.reply_to(message, "🎙 أرسل صوت الآن… لديك 120 ثانية مجانية.")
 
 
 @bot.message_handler(content_types=["voice", "audio"])
 def handle_audio(message):
     uid = str(message.from_user.id)
-    username = message.from_user.username or ""
-    users = ensure_user(uid, username)
+    users = ensure_user(uid, message.from_user.username or "")
 
-    # تحديد النوع
-    file_info = bot.get_file(message.voice.file_id if message.content_type == "voice" else message.audio.file_id)
-    file_path = file_info.file_path
+    # المدة
+    duration = (
+        message.voice.duration if message.content_type == "voice"
+        else message.audio.duration
+    )
 
-    if file_path.endswith(".oga") or file_path.endswith(".ogg"):
-        ext, mime = "ogg", "audio/ogg"
-    elif file_path.endswith(".mp3"):
-        ext, mime = "mp3", "audio/mpeg"
-    elif file_path.endswith(".m4a"):
-        ext, mime = "m4a", "audio/mp4"
-    elif file_path.endswith(".wav"):
-        ext, mime = "wav", "audio/wav"
-    else:
-        ext, mime = "mp3", "audio/mpeg"
-
-    # مدة الصوت
-    if message.content_type == "voice":
-        duration = message.voice.duration
-        file_id = message.voice.file_id
-    else:
-        duration = message.audio.duration or 0
-        file_id = message.audio.file_id
-
-    used = users[uid]["used"]
-    paid = users[uid]["paid"]
-
-    available = FREE_LIMIT + paid - used
+    # رصيد الوقت
+    available = FREE_LIMIT + users[uid]["paid"] - users[uid]["used"]
 
     if duration > available:
-        return bot.reply_to(
-            message,
-            f"❌ الوقت غير كافٍ.\n"
-            f"⏳ المتبقي: {max(0, available)} ثانية.\n"
-            "📄 اشترِ باقة لزيادة رصيدك."
-        )
+        return bot.reply_to(message, f"❌ وقتك غير كافٍ. المتبقي: {available} ثانية.")
 
     wait_msg = bot.reply_to(message, "⏳ جاري التفريغ…")
 
-    try:
-        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
-        audio_bytes = requests.get(file_url).content
-    except:
-        return bot.edit_message_text("❌ خطأ أثناء تحميل الصوت.", wait_msg.chat.id, wait_msg.message_id)
+    # تحميل الملف
+    file_id = message.voice.file_id if message.content_type == "voice" else message.audio.file_id
+    file_info = bot.get_file(file_id)
+    url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
+    audio_bytes = requests.get(url).content
 
-    text = transcribe_audio(audio_bytes, ext, mime)
+    # تفريغ OpenAI
+    text = transcribe_openai(audio_bytes)
 
     if not text:
-        return bot.edit_message_text("❌ لم أستطع تفريغ الصوت.", wait_msg.chat.id, wait_msg.message_id)
+        return bot.edit_message_text("❌ فشل التفريغ.", wait_msg.chat.id, wait_msg.message_id)
 
+    # خصم الوقت
     users = load_users()
     users[uid]["used"] += duration
     save_users(users)
 
     bot.edit_message_text(
-        f"✅ تم التفريغ بنجاح!\n\n"
-        f"📄 النص:\n{text}\n\n"
-        f"⏱ مدة التسجيل: {duration} ثانية.\n"
-        f"🔢 المجموع حتى الآن: {users[uid]['used']} ثانية.",
+        f"✅ تم التفريغ بنجاح:\n\n{text}\n\n⏱ المدة: {duration} ثانية.",
         wait_msg.chat.id,
         wait_msg.message_id,
     )
