@@ -1,217 +1,241 @@
 import os
-import json
-import time
 import telebot
 import requests
-from pydub import AudioSegment
-from telebot.types import ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
+import time
+import subprocess
+import uuid
 
-# -----------------------------
-#  الإعدادات
-# -----------------------------
+# =========================
+# متغيرات البيئة
+# =========================
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
+
+if not BOT_TOKEN or not DEEPGRAM_API_KEY:
+    raise RuntimeError("❌ يجب ضبط BOT_TOKEN و DEEPGRAM_API_KEY في إعدادات Koyeb")
+
+bot = telebot.TeleBot(BOT_TOKEN)
+
+# =========================
+# حسابك أنت فقط (Admin)
+# =========================
 ADMIN_ID = 604494923
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-DEEPGRAM_KEY = os.getenv("DEEPGRAM_KEY")
 
-if not TELEGRAM_TOKEN or not DEEPGRAM_KEY:
-    raise RuntimeError("❌ يجب ضبط TELEGRAM_TOKEN و DEEPGRAM_KEY داخل Koyeb")
+# =========================
+# قاعدة بيانات بسيطة
+# =========================
+users_db = {}   # {user_id: {"used_seconds": xx, "plan_seconds": yy, "username": "@"}}
+free_seconds = 120  # دقيقتين مجانا
 
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
+# =========================
+# تحويل الصوت إلى WAV (بدون pydub)
+# =========================
+def convert_to_wav(input_bytes):
+    temp_in = f"/tmp/{uuid.uuid4()}.mp3"
+    temp_out = f"/tmp/{uuid.uuid4()}.wav"
 
-# -----------------------------
-#  قاعدة البيانات
-# -----------------------------
-DB_FILE = "users.json"
+    with open(temp_in, "wb") as f:
+        f.write(input_bytes)
 
-def load_db():
-    if not os.path.exists(DB_FILE):
-        return {}
-    return json.load(open(DB_FILE, "r"))
+    subprocess.run([
+        "ffmpeg", "-i", temp_in,
+        "-ar", "16000", "-ac", "1",
+        temp_out, "-y", "-loglevel", "quiet"
+    ])
 
-def save_db(db):
-    json.dump(db, open(DB_FILE, "w"), indent=2)
+    with open(temp_out, "rb") as f:
+        return f.read()
 
-db = load_db()
+# =========================
+# Deepgram تفريغ الصوت عبر
+# =========================
+def deepgram_transcribe(wav_bytes):
+    url = "https://api.deepgram.com/v1/listen"
+    headers = {
+        "Authorization": f"Token {DEEPGRAM_API_KEY}",
+        "Content-Type": "audio/wav"
+    }
+    response = requests.post(url, headers=headers, data=wav_bytes)
+    data = response.json()
 
-# -----------------------------
-#  مساعدات
-# -----------------------------
-def get_user(uid):
-    if str(uid) not in db:
-        db[str(uid)] = {
-            "free_used": False,
-            "minutes_left": 0,
-            "total_used": 0
-        }
-        save_db(db)
-    return db[str(uid)]
-
-def notify_admin(text):
     try:
-        bot.send_message(ADMIN_ID, text)
+        text = data["results"]["channels"][0]["alternatives"][0]["transcript"]
+        return text
     except:
-        pass
+        return None
 
-def format_user(user):
-    name = user.first_name or "مجهول"
-    uname = f"@{user.username}" if user.username else "بدون يوزر"
-    return f"👤 الاسم: {name}\n🔗 اليوزر: {uname}\n🆔 الايدي: {user.id}"
-
-# -----------------------------
-#  رسالة الترحيب
-# -----------------------------
+# =========================
+# واجهة الأزرار
+# =========================
 def main_menu():
-    mk = ReplyKeyboardMarkup(resize_keyboard=True)
-    mk.row("🎧 تفريغ صوت")
-    mk.row("💳 اشتراك", "⚙️ الإعدادات")
-    return mk
+    kb = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row("🎧 تفريغ صوت")
+    kb.row("💳 الاشتراكات", "⚙️ الإعدادات")
+    return kb
 
-WELCOME = (
-    "🎉 أهلاً بك في *الأسطورة للتفريغ الصوتي*!\n\n"
-    "🎧 المميزات:\n"
-    "• دقيقتان مجاناً\n"
-    "• دفع USDT TRC20 أو Payeer\n"
-    "• اشتراكات حسب مدة الصوت (تفريغ حقيقي)\n"
-    "• نظام احترافي للمشتركين\n\n"
-    "اختر من القائمة بالأسفل 👇"
-)
+def subscription_menu():
+    kb = telebot.types.InlineKeyboardMarkup()
+    kb.add(
+        telebot.types.InlineKeyboardButton("⏱ 1 ساعة — 5$", callback_data="plan_3600"),
+        telebot.types.InlineKeyboardButton("⏱ 2 ساعات — 9$", callback_data="plan_7200"),
+    )
+    kb.add(
+        telebot.types.InlineKeyboardButton("⏱ 5 ساعات — 20$", callback_data="plan_18000")
+    )
+    kb.add(
+        telebot.types.InlineKeyboardButton("رجوع ⬅️", callback_data="back_menu")
+    )
+    return kb
 
-# -----------------------------
-#  بدء التشغيل
-# -----------------------------
+# =========================
+# رسالة Start
+# =========================
 @bot.message_handler(commands=["start"])
-def start_cmd(msg):
-    bot.send_message(msg.chat.id, WELCOME, reply_markup=main_menu(), parse_mode="Markdown")
+def start(message):
+    user_id = message.from_user.id
+    username = message.from_user.username or "بدون_يوزر"
 
-    # إرسال بيانات المستخدم للأدمن
-    notify_admin("🔥 مستخدم جديد:\n" + format_user(msg.from_user))
+    if user_id not in users_db:
+        users_db[user_id] = {
+            "used_seconds": 0,
+            "plan_seconds": 0,
+            "username": username
+        }
 
-# -----------------------------
-#  لوحة الإعدادات
-# -----------------------------
+    bot.send_message(
+        user_id,
+        f"👋 أهلاً بك في *الأسطورة للتفريغ الصوتي*\n\n"
+        f"🎙 يدعم العربية تلقائياً\n"
+        f"🎁 لديك دقيقتان مجاناً\n"
+        f"🆔 ID: `{user_id}`\n"
+        f"👤 Username: @{username}\n\n"
+        "اختر من القائمة:",
+        parse_mode="Markdown",
+        reply_markup=main_menu()
+    )
+
+# =========================
+# زر الاشتراكات
+# =========================
+@bot.message_handler(func=lambda m: m.text == "💳 الاشتراكات")
+def show_plans(message):
+    bot.send_message(
+        message.chat.id,
+        "اختر الخطة المناسبة لك:",
+        reply_markup=subscription_menu()
+    )
+
+# =========================
+# زر الإعدادات
+# =========================
 @bot.message_handler(func=lambda m: m.text == "⚙️ الإعدادات")
-def settings(msg):
-    user = get_user(msg.from_user.id)
-    txt = (
-        f"⚙️ *إعدادات حسابك*\n\n"
-        f"🆔 ID: `{msg.from_user.id}`\n"
-        f"⏳ الدقائق المتبقية: {user['minutes_left']} دقيقة\n"
-        f"🎧 تم تفريغ: {user['total_used']} دقيقة\n"
+def settings(message):
+    user_id = message.from_user.id
+    u = users_db[user_id]
+
+    remain = u["plan_seconds"] - u["used_seconds"]
+    if remain < 0: remain = 0
+
+    bot.send_message(
+        user_id,
+        f"⚙️ إعدادات الاشتراك:\n\n"
+        f"⏳ الوقت المستخدم: {u['used_seconds']} ثانية\n"
+        f"🎁 المتبقي: {remain} ثانية\n"
+        f"🆔 ID: `{user_id}`\n"
+        f"👤 Username: @{u['username']}",
+        parse_mode="Markdown"
     )
-    bot.send_message(msg.chat.id, txt, parse_mode="Markdown")
 
-# -----------------------------
-#  قائمة الاشتراكات
-# -----------------------------
-@bot.message_handler(func=lambda m: m.text == "💳 اشتراك")
-def sub_menu(msg):
-    mk = InlineKeyboardMarkup()
-    mk.add(
-        InlineKeyboardButton("⏱ 1 ساعة — 5$", callback_data="p1"),
-        InlineKeyboardButton("⏱ 2 ساعة — 9$", callback_data="p2")
-    )
-    mk.add(
-        InlineKeyboardButton("⏱ 5 ساعات — 20$", callback_data="p5")
-    )
-    mk.add(
-        InlineKeyboardButton("طرق الدفع", callback_data="pay")
-    )
-    bot.send_message(msg.chat.id, "💳 اختر خطة الاشتراك:", reply_markup=mk)
-
-# -----------------------------
-#  طرق الدفع
-# -----------------------------
-@bot.callback_query_handler(func=lambda c: c.data == "pay")
-def show_payment(c):
-    txt = (
-        "💰 *طرق الدفع المقبولة:*\n\n"
-        "💎 USDT TRC20:\n"
-        "`TRWu3vC1GRDwbEymaiPNjXbpUw4wmwSRYa`\n\n"
-        "💳 Payeer:\n"
-        "`P1058635648`\n\n"
-        "📤 بعد الدفع: قم بإرسال لقطة الشاشة وسيتم تفعيل اشتراكك."
-    )
-    bot.send_message(c.message.chat.id, txt, parse_mode="Markdown")
-
-# -----------------------------
-#  تفعيل الخطة بعد الدفع (يدوياً من الأدمن)
-# -----------------------------
-@bot.message_handler(commands=["add"])
-def add_time(msg):
-    if msg.from_user.id != ADMIN_ID:
-        return bot.send_message(msg.chat.id, "❌ هذا الأمر للمدير فقط")
-
-    try:
-        uid, minutes = msg.text.split()[1:]
-        minutes = int(minutes)
-    except:
-        return bot.send_message(msg.chat.id, "❗ مثال:\n/add 123456789 60")
-
-    user = get_user(uid)
-    user["minutes_left"] += minutes
-    save_db(db)
-
-    bot.send_message(msg.chat.id, "✔ تم إضافة الوقت.")
-    bot.send_message(int(uid), f"🎉 تم تفعيل اشتراكك!\n⏳ الرصيد المتبقي: {user['minutes_left']} دقيقة")
-
-# -----------------------------
-#  معالجة الصوت
-# -----------------------------
-@bot.message_handler(func=lambda m: m.text == "🎧 تفريغ صوت")
-def ask_voice(msg):
-    bot.send_message(msg.chat.id, "🎤 أرسل الآن المقطع الصوتي…")
-
+# =========================
+# استقبال الصوت
+# =========================
 @bot.message_handler(content_types=['voice', 'audio'])
-def handle_audio(msg):
-    uid = msg.from_user.id
-    user = get_user(uid)
+def handle_voice(message):
+    user_id = message.from_user.id
+    u = users_db[user_id]
 
-    notify_admin("🎧 صوت جديد من:\n" + format_user(msg.from_user))
+    # التأكد من وجود رصيد وقت
+    if u["used_seconds"] >= (free_seconds + u["plan_seconds"]):
+        bot.send_message(user_id, "❌ انتهى رصيدك.\n💳 اشترك لإكمال التفريغ.")
+        return
 
-    # تنزيل الصوت
-    fid = msg.voice.file_id if msg.voice else msg.audio.file_id
-    finfo = bot.get_file(fid)
-    url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{finfo.file_path}"
-    data = requests.get(url).content
+    bot.send_message(user_id, "⏳ جاري معالجة الصوت…")
+
+    # جلب الملف
+    file_id = message.voice.file_id if message.voice else message.audio.file_id
+    info = bot.get_file(file_id)
+    url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{info.file_path}"
+    file_bytes = requests.get(url).content
+
+    wav_bytes = convert_to_wav(file_bytes)
+    text = deepgram_transcribe(wav_bytes)
+
+    if not text:
+        bot.send_message(user_id, "❌ فشل التفريغ.")
+        return
 
     # حساب مدة الصوت
-    temp = "temp.ogg"
-    open(temp, "wb").write(data)
-    audio = AudioSegment.from_file(temp)
-    duration_sec = len(audio) // 1000
-    duration_min = duration_sec / 60
+    duration = message.voice.duration if message.voice else message.audio.duration
+    u["used_seconds"] += duration
 
-    # نظام الدقيقتين المجانية
-    if not user["free_used"]:
-        user["free_used"] = True
-        save_db(db)
+    bot.send_message(
+        user_id,
+        f"🎙 *النص المستخرج:*\n{text}",
+        parse_mode="Markdown"
+    )
 
-        if duration_sec > 120:
-            audio = audio[:120000]
+# =========================
+# معالجة شراء الباقات
+# =========================
+@bot.callback_query_handler(func=lambda c: c.data.startswith("plan_"))
+def buy_plan(c):
+    user_id = c.from_user.id
+    plan_seconds = int(c.data.split("_")[1])
 
-        bot.send_message(msg.chat.id, "⏳ جاري التفريغ المجاني…")
-    else:
-        # يحتاج اشتراك
-        needed = duration_sec // 60 + 1
-        if user["minutes_left"] < needed:
-            return bot.send_message(msg.chat.id, "❌ انتهى رصيدك.\n💳 اشترك لإكمال التفريغ.", reply_markup=main_menu())
+    price = {3600: "5$", 7200: "9$", 18000: "20$"}[plan_seconds]
 
-        user["minutes_left"] -= needed
-        user["total_used"] += needed
-        save_db(db)
-        bot.send_message(msg.chat.id, f"⏳ تم خصم {needed} دقيقة…")
+    bot.edit_message_text(
+        f"💳 اخترت باقة مدة: {plan_seconds//60} دقيقة\n"
+        f"السعر: *{price}*\n\n"
+        "طرق الدفع:\n"
+        "🔥 USDT (TRC20): `TRWu3vC1GRDwbEymaiPNjXbpUw4wmwSRYa`\n"
+        "💰 Payeer: `P1058635648`\n\n"
+        "بعد الدفع أرسل لقطة شاشة ليتم تفعيل الباقة.",
+        chat_id=user_id,
+        message_id=c.message.message_id,
+        parse_mode="Markdown"
+    )
 
-    # إرسال الصوت إلى Deepgram
-    headers = {
-        "Authorization": f"Token {DEEPGRAM_KEY}",
-        "Content-Type": "audio/ogg"
-    }
-    res = requests.post("https://api.deepgram.com/v1/listen", headers=headers, data=audio.export(format="ogg"))
-    text = res.json().get("results", {}).get("channels", [{}])[0].get("alternatives", [{}])[0].get("transcript")
+# =========================
+# زر الرجوع
+# =========================
+@bot.callback_query_handler(func=lambda c: c.data == "back_menu")
+def back_menu(c):
+    bot.edit_message_text(
+        "اختر من القائمة:",
+        chat_id=c.from_user.id,
+        message_id=c.message.message_id
+    )
 
-    bot.send_message(msg.chat.id, f"📝 النص المستخرج:\n{text}")
+# =========================
+# لوحة تحكم الأدمن
+# =========================
+@bot.message_handler(commands=["admin"])
+def admin_panel(message):
+    if message.from_user.id != ADMIN_ID:
+        return
 
-# -----------------------------
-#  تشغيل البوت
-# -----------------------------
+    total_users = len(users_db)
+
+    bot.send_message(
+        ADMIN_ID,
+        f"📊 *لوحة التحكم*\n\n"
+        f"👥 عدد المشتركين: {total_users}\n",
+        parse_mode="Markdown"
+    )
+
+
+# =========================
+# تشغيل البوت
+# =========================
 bot.infinity_polling()
