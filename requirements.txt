@@ -2,3 +2,4 @@ pyTelegramBotAPI
 requests
 pydub
 ffmpeg-python
+deepgram-sdk
