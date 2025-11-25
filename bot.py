@@ -25,27 +25,26 @@ if not os.path.exists(DATA_FILE):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump({}, f, ensure_ascii=False, indent=2)
 
-
 def load_users():
     with open(DATA_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
-
 
 def save_users(data):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-
 def ensure_user(uid: str, username: str | None = None):
     users = load_users()
     if uid not in users:
-        users[uid] = {
-            "used": 0,      # الثواني المستخدمة
-            "paid": 0,      # الثواني المدفوعة المتبقية
-            "username": username or ""
-        }
+        users[uid] = {"used": 0, "paid": 0, "username": username or ""}
         save_users(users)
     return users
+
+
+# ==========================
+# تخزين آخر باقة اختارها المستخدم
+# ==========================
+LAST_PLAN = {}  # مثال: LAST_PLAN[user_id] = 60
 
 
 # ==========================
@@ -64,7 +63,6 @@ def main_menu():
 USDT_ADDR = "TRWu3vC1GRDwbEymaiPNjXbpUw4wmwSRYa"
 PAYEER_ADDR = "P1058635648"
 
-
 def payment_keyboard():
     kb = types.InlineKeyboardMarkup()
     kb.add(
@@ -72,7 +70,6 @@ def payment_keyboard():
         types.InlineKeyboardButton("بايير", callback_data="pay_payeer"),
     )
     return kb
-
 
 USDT_MESSAGE = (
     " USDT (TRC20)\n\n"
@@ -91,42 +88,27 @@ PAYEER_MESSAGE = (
 # /start
 # ==========================
 @bot.message_handler(commands=["start"])
-def cmd_start(message: telebot.types.Message):
+def cmd_start(message):
     uid = str(message.from_user.id)
     username = message.from_user.username or ""
     ensure_user(uid, username)
 
-    # إشعار للأدمن بدخول مستخدم جديد
+    # إشعار الأدمن
     if ADMIN_ID:
-        try:
-            if username:
-                admin_text = (
-                    "📥 مستخدم جديد استخدم /start\n"
-                    f"🆔 ID: <code>{uid}</code>\n"
-                    f"👤 Username: @{username}"
-                )
-            else:
-                admin_text = (
-                    "📥 مستخدم جديد استخدم /start\n"
-                    f"🆔 ID: <code>{uid}</code>\n"
-                    "👤 لا يوجد Username"
-                )
-            bot.send_message(
-                chat_id=ADMIN_ID,
-                text=admin_text,
-                parse_mode="HTML"
-            )
-        except Exception:
-            pass
+        bot.send_message(
+            ADMIN_ID,
+            f"📩 مستخدم جديد استخدم /start\n"
+            f"🆔 ID: <code>{uid}</code>\n"
+            f"👤 Username: @{username}" if username else "👤 بدون Username",
+            parse_mode="HTML"
+        )
 
     bot.send_message(
-        chat_id=message.chat.id,
-        text=(
-            "👋 أهلاً بك في الأسطورة للتفريغ الصوتي!\n\n"
-            "🎙 يدعم العربية 100% باستخدام Whisper من OpenAI.\n"
-            "🎁 لديك 120 ثانية مجانية للتجربة.\n\n"
-            "اختر من الأزرار بالأسفل أو أرسل مقطعًا صوتيًا مباشرة."
-        ),
+        message.chat.id,
+        "👋 أهلاً بك في الأسطورة للتفريغ الصوتي!\n\n"
+        "🎙 يدعم اللغة العربية 100% باستخدام Whisper.\n"
+        "🎁 لديك 120 ثانية مجانية للتجربة.\n\n"
+        "اختر من الأزرار بالأسفل أو أرسل مقطعًا صوتيًا الآن.",
         reply_markup=main_menu(),
     )
 
@@ -135,371 +117,217 @@ def cmd_start(message: telebot.types.Message):
 # الاشتراكات
 # ==========================
 @bot.message_handler(func=lambda m: m.text == "📄 الاشتراكات")
-def show_plans(message: telebot.types.Message):
+def show_plans(message):
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("🕐 60 دقيقة – 5$", callback_data="plan_60"))
     kb.add(types.InlineKeyboardButton("🕑 120 دقيقة – 9$", callback_data="plan_120"))
     kb.add(types.InlineKeyboardButton("🕔 300 دقيقة – 20$", callback_data="plan_300"))
-
-    bot.send_message(
-        chat_id=message.chat.id,
-        text="💳 اختر الباقة:",
-        reply_markup=kb
-    )
+    bot.send_message(message.chat.id, "💳 اختر الباقة:", reply_markup=kb)
 
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("plan_"))
-def plan_selected(call: telebot.types.CallbackQuery):
-    if call.data == "plan_60":
-        msg = "اخترت 60 دقيقة – 5$.\n\nاختر طريقة الدفع:"
-    elif call.data == "plan_120":
-        msg = "اخترت 120 دقيقة – 9$.\n\nاختر طريقة الدفع:"
-    else:
-        msg = "اخترت 300 دقيقة – 20$.\n\nاختر طريقة الدفع:"
+@bot.callback_query_handler(func=lambda c: c.data in ("plan_60", "plan_120", "plan_300"))
+def on_plan_selected(call):
+    plans_text = {
+        "plan_60": ("اخترت باقة 60 دقيقة مقابل 5$.\n\nاختر طريقة الدفع:", 60),
+        "plan_120": ("اخترت باقة 120 دقيقة مقابل 9$.\n\nاختر طريقة الدفع:", 120),
+        "plan_300": ("اخترت باقة 300 دقيقة مقابل 20$.\n\nاختر طريقة الدفع:", 300),
+    }
+
+    text, minutes = plans_text[call.data]
+
+    # 🔥 حفظ آخر باقة اختارها المستخدم
+    LAST_PLAN[str(call.from_user.id)] = minutes
 
     bot.edit_message_text(
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
-        text=msg,
+        text=text,
         reply_markup=payment_keyboard(),
     )
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "pay_usdt")
-def pay_usdt(call: telebot.types.CallbackQuery):
+def pay_usdt(call):
     bot.answer_callback_query(call.id)
-    bot.send_message(
-        chat_id=call.message.chat.id,
-        text=USDT_MESSAGE
-    )
-
+    bot.send_message(call.message.chat.id, USDT_MESSAGE)
 
 @bot.callback_query_handler(func=lambda c: c.data == "pay_payeer")
-def pay_payeer(call: telebot.types.CallbackQuery):
+def pay_payeer(call):
     bot.answer_callback_query(call.id)
-    bot.send_message(
-        chat_id=call.message.chat.id,
-        text=PAYEER_MESSAGE
-    )
+    bot.send_message(call.message.chat.id, PAYEER_MESSAGE)
 
 
 # ==========================
-# لوحة تحكم الأدمن (رئيسية)
+# لوحة التحكم
 # ==========================
 @bot.message_handler(func=lambda m: m.text == "⚙️ الإعدادات")
-def admin_panel(message: telebot.types.Message):
+def admin_panel(message):
     if message.from_user.id != ADMIN_ID:
-        return bot.reply_to(message, "❌ ليس لديك صلاحية الدخول إلى لوحة التحكم.")
+        return bot.reply_to(message, "❌ هذا القسم للأدمن فقط.")
 
     users = load_users()
     total_users = len(users)
-    total_used = sum(u.get("used", 0) for u in users.values())
-    total_paid = sum(u.get("paid", 0) for u in users.values())
+    total_used = sum(u["used"] for u in users.values())
+    total_paid = sum(u["paid"] for u in users.values())
 
-    text = (
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row("📋 عرض المستخدمين")
+    kb.row("🔄 تحديث")
+    kb.row("⬅️ رجوع")
+
+    bot.send_message(
+        message.chat.id,
         "🛠 لوحة تحكم الأسطورة\n\n"
         f"👥 عدد المستخدمين: {total_users}\n"
         f"⏱ إجمالي الوقت المستخدم: {total_used} ثانية\n"
-        f"🎁 الوقت المدفوع المتبقي (مجموع الجميع): {total_paid} ثانية\n\n"
-        "اختر من الخيارات بالأسفل:"
-    )
-
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("📋 عرض المستخدمين", callback_data="show_users"))
-    kb.add(types.InlineKeyboardButton("🔄 تحديث", callback_data="refresh_admin"))
-
-    bot.send_message(
-        chat_id=message.chat.id,
-        text=text,
+        f"🎁 الوقت المدفوع المتبقي (المجموع): {total_paid} ثانية\n\n"
+        "اختر من الخيارات بالأسفل:",
         reply_markup=kb
     )
 
 
 # ==========================
-# عرض جميع المستخدمين
+# عرض المستخدمين
 # ==========================
-@bot.callback_query_handler(func=lambda c: c.data == "show_users")
-def admin_show_users(call: telebot.types.CallbackQuery):
-    if call.from_user.id != ADMIN_ID:
-        return bot.answer_callback_query(call.id, "❌ ليس لديك صلاحية.")
-
-    users = load_users()
-
-    if not users:
-        return bot.edit_message_text(
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            text="❌ لا يوجد مستخدمين حتى الآن."
-        )
-
-    kb = types.InlineKeyboardMarkup()
-    for uid, u in users.items():
-        username = f"@{u['username']}" if u.get("username") else "بدون يوزر"
-        kb.add(
-            types.InlineKeyboardButton(
-                f"{username} — {uid}",
-                callback_data=f"user_{uid}"
-            )
-        )
-
-    bot.edit_message_text(
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
-        text="📋 اختر مستخدم لعرض تفاصيله:",
-        reply_markup=kb
-    )
-
-
-# ==========================
-# تفاصيل مستخدم واحد
-# ==========================
-@bot.callback_query_handler(func=lambda c: c.data.startswith("user_"))
-def admin_user_details(call: telebot.types.CallbackQuery):
-    if call.from_user.id != ADMIN_ID:
-        return bot.answer_callback_query(call.id, "❌ ليس لديك صلاحية.")
-
-    uid = call.data.split("_")[1]
-    users = load_users()
-
-    if uid not in users:
-        return bot.answer_callback_query(call.id, "❌ المستخدم غير موجود.")
-
-    u = users[uid]
-    username = f"@{u['username']}" if u.get("username") else "بدون يوزر"
-
-    text = (
-        f"👤 المستخدم: {username}\n"
-        f"🆔 ID: `{uid}`\n\n"
-        f"⏱ الوقت المستخدم: {u.get('used', 0)} ثانية\n"
-        f"🎁 الوقت المدفوع المتبقي: {u.get('paid', 0)} ثانية\n\n"
-        "🔧 خيارات التحكم:"
-    )
-
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("➕ إضافة وقت", callback_data=f"addtime_{uid}"))
-    kb.add(types.InlineKeyboardButton("🗑 حذف المستخدم", callback_data=f"deluser_{uid}"))
-    kb.add(types.InlineKeyboardButton("⬅️ رجوع", callback_data="show_users"))
-
-    bot.edit_message_text(
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
-        text=text,
-        reply_markup=kb,
-        parse_mode="Markdown"
-    )
-
-
-# ==========================
-# اختيار مدة الإضافة
-# ==========================
-@bot.callback_query_handler(func=lambda c: c.data.startswith("addtime_"))
-def admin_add_time_menu(call: telebot.types.CallbackQuery):
-    if call.from_user.id != ADMIN_ID:
-        return bot.answer_callback_query(call.id, "❌ ليس لديك صلاحية.")
-
-    uid = call.data.split("_")[1]
-
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("30 دقيقة", callback_data=f"add_30_{uid}"))
-    kb.add(types.InlineKeyboardButton("60 دقيقة", callback_data=f"add_60_{uid}"))
-    kb.add(types.InlineKeyboardButton("120 دقيقة", callback_data=f"add_120_{uid}"))
-    kb.add(types.InlineKeyboardButton("300 دقيقة", callback_data=f"add_300_{uid}"))
-    kb.add(types.InlineKeyboardButton("⬅️ رجوع", callback_data=f"user_{uid}"))
-
-    bot.edit_message_text(
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
-        text="⏱ اختر عدد الدقائق لإضافتها:",
-        reply_markup=kb
-    )
-
-
-# ==========================
-# تنفيذ الإضافة
-# ==========================
-@bot.callback_query_handler(func=lambda c: c.data.startswith("add_"))
-def admin_add_time(call: telebot.types.CallbackQuery):
-    if call.from_user.id != ADMIN_ID:
-        return bot.answer_callback_query(call.id, "❌ ليس لديك صلاحية.")
-
-    _, mins, uid = call.data.split("_")
-    mins = int(mins)
-
-    users = load_users()
-    if uid not in users:
-        return bot.answer_callback_query(call.id, "❌ المستخدم غير موجود.")
-
-    users[uid]["paid"] = users[uid].get("paid", 0) + mins * 60
-    save_users(users)
-
-    bot.answer_callback_query(call.id, f"✔ تمت إضافة {mins} دقيقة.")
-    # إعادة عرض تفاصيل المستخدم بعد التحديث
-    admin_user_details(call)
-
-
-# ==========================
-# حذف مستخدم
-# ==========================
-@bot.callback_query_handler(func=lambda c: c.data.startswith("deluser_"))
-def admin_delete_user(call: telebot.types.CallbackQuery):
-    if call.from_user.id != ADMIN_ID:
-        return bot.answer_callback_query(call.id, "❌ ليس لديك صلاحية.")
-
-    uid = call.data.split("_")[1]
-    users = load_users()
-
-    if uid not in users:
-        return bot.answer_callback_query(call.id, "❌ المستخدم غير موجود.")
-
-    del users[uid]
-    save_users(users)
-
-    bot.answer_callback_query(call.id, "🗑 تم حذف المستخدم.")
-    admin_show_users(call)
-
-
-# ==========================
-# تحديث لوحة التحكم
-# ==========================
-@bot.callback_query_handler(func=lambda c: c.data == "refresh_admin")
-def admin_refresh(call: telebot.types.CallbackQuery):
-    if call.from_user.id != ADMIN_ID:
-        return bot.answer_callback_query(call.id, "❌ ليس لديك صلاحية.")
-    # نستدعي لوحة التحكم من جديد
-    admin_panel(call.message)
-
-
-# ==========================
-# /add_time (بسيط – يوجّه للأزرار)
-# ==========================
-@bot.message_handler(commands=["add_time"])
-def add_time_cmd(message: telebot.types.Message):
+@bot.message_handler(func=lambda m: m.text == "📋 عرض المستخدمين")
+def show_users(message):
     if message.from_user.id != ADMIN_ID:
         return
-    bot.reply_to(
-        message,
-        "ℹ️ لإضافة وقت لمستخدم استخدم:\n"
-        "زر ⚙️ الإعدادات → 📋 عرض المستخدمين → اختر المستخدم → ➕ إضافة وقت."
+
+    users = load_users()
+    text = "📋 قائمة المستخدمين:\n\n"
+
+    for uid, info in users.items():
+        text += (
+            f"🆔 {uid}\n"
+            f"👤 @{info['username']}\n"
+            f"⏱ المستخدم: {info['used']} ثانية\n"
+            f"🎁 المدفوع: {info['paid']} ثانية\n\n"
+        )
+
+    bot.send_message(message.chat.id, text)
+
+
+# ==========================
+# أمر إضافة الوقت المبسط
+# ==========================
+@bot.message_handler(commands=["add_time"])
+def add_time(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    parts = message.text.split()
+    if len(parts) != 3:
+        return bot.reply_to(message, "❌ الصيغة:\n/add_time user_id دقائق")
+
+    uid = parts[1]
+    minutes = int(parts[2])
+
+    users = load_users()
+    if uid not in users:
+        return bot.reply_to(message, "❌ المستخدم غير موجود.")
+
+    users[uid]["paid"] += minutes * 60
+    save_users(users)
+
+    bot.reply_to(message, f"✔ تمت إضافة {minutes} دقيقة للمستخدم.")
+
+
+# ==========================
+# 📸 إشعار الأدمن عند إرسال لقطة شاشة
+# ==========================
+@bot.message_handler(content_types=["photo"])
+def handle_screenshot(message):
+    uid = str(message.from_user.id)
+    username = message.from_user.username or "بدون Username"
+
+    minutes = LAST_PLAN.get(uid, "غير معروف")
+
+    admin_msg = (
+        "📸 استلمت لقطة شاشة لإثبات الدفع:\n\n"
+        f"🆔 ID: <code>{uid}</code>\n"
+        f"👤 Username: @{username}\n"
+        f"⏱ الباقة المختارة: {minutes} دقيقة\n"
+        "📥 الصورة بالأسفل:"
     )
 
+    if ADMIN_ID:
+        bot.send_message(ADMIN_ID, admin_msg, parse_mode="HTML")
+        bot.send_photo(ADMIN_ID, message.photo[-1].file_id)
+
+    bot.reply_to(message, "👌 تم استلام لقطة الشاشة، سيتم التفعيل قريبًا.")
+
 
 # ==========================
-# تفريغ الصوت – OpenAI Whisper
+# 🔥 تفريغ الصوت باستخدام Whisper
 # ==========================
-def transcribe_openai(audio_bytes: bytes) -> str | None:
-    """
-    تفريغ الصوت باستخدام OpenAI Whisper عبر /audio/transcriptions
-    مع تركيز على العربية.
-    """
+def transcribe_openai(audio_bytes: bytes):
     url = "https://api.openai.com/v1/audio/transcriptions"
 
     files = {
-        "file": ("audio.mp3", audio_bytes),
-    }
-    data = {
-        "model": "whisper-1",      # نموذج Whisper
-        "response_format": "text", # نريد نصاً مباشراً
-        "language": "ar",          # تركيز على العربية
+        "file": ("audio.mp3", audio_bytes, "audio/mpeg"),
+        "model": (None, "whisper-1"),
+        "response_format": (None, "text"),
     }
 
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}"
-    }
+    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
 
     try:
-        resp = requests.post(url, headers=headers, files=files, data=data)
-        if resp.status_code != 200:
-            # طباعة الخطأ في اللوج فقط
-            print("OpenAI error:", resp.text)
-            return None
-        return resp.text
+        r = requests.post(url, headers=headers, files=files)
+        return r.text
     except Exception as e:
-        print("OpenAI exception:", e)
+        print("OpenAI error:", e)
         return None
 
 
 # ==========================
 # 🎧 تفريغ صوت
 # ==========================
-FREE_LIMIT = 120  # 120 ثانية مجانية
+FREE_LIMIT = 120
 
 @bot.message_handler(func=lambda m: m.text == "🎧 تفريغ صوت")
-def explain(message: telebot.types.Message):
-    bot.reply_to(
-        message,
-        "🎙 أرسل الآن مقطعًا صوتيًا أو ملفًا صوتيًا.\n"
-        f"🎁 لديك {FREE_LIMIT} ثانية مجانية.\n"
-        "بعدها تحتاج للاشتراك من خلال قسم الاشتراكات."
-    )
-
+def explain(message):
+    bot.reply_to(message, "🎙 أرسل صوت الآن… لديك 120 ثانية مجانية.")
 
 @bot.message_handler(content_types=["voice", "audio"])
-def handle_audio(message: telebot.types.Message):
+def handle_audio(message):
     uid = str(message.from_user.id)
-    username = message.from_user.username or ""
-    users = ensure_user(uid, username)
+    users = ensure_user(uid, message.from_user.username or "")
 
     # المدة
-    if message.content_type == "voice":
-        duration = message.voice.duration
-        file_id = message.voice.file_id
-    else:
-        duration = message.audio.duration or 0
-        file_id = message.audio.file_id
+    duration = (
+        message.voice.duration if message.content_type == "voice"
+        else message.audio.duration
+    )
 
-    used = users[uid]["used"]
-    paid = users[uid]["paid"]
-    available = FREE_LIMIT + paid - used
+    # رصيد
+    available = FREE_LIMIT + users[uid]["paid"] - users[uid]["used"]
 
     if duration > available:
-        return bot.reply_to(
-            message,
-            f"❌ وقتك غير كافٍ.\n"
-            f"⏱ المتبقي لك: {max(0, available)} ثانية.\n"
-            "📄 اشترِ باقة من قسم الاشتراكات لزيادة رصيدك."
-        )
+        return bot.reply_to(message, f"❌ وقتك غير كافٍ. المتبقي: {available} ثانية.")
 
-    wait_msg = bot.reply_to(message, "⏳ جاري التفريغ باستخدام Whisper…")
+    wait_msg = bot.reply_to(message, "⏳ جاري التفريغ…")
 
-    # تحميل الملف من تيليجرام
-    try:
-        file_info = bot.get_file(file_id)
-        url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
-        audio_bytes = requests.get(url).content
-    except Exception as e:
-        print("Download error:", e)
-        bot.edit_message_text(
-            chat_id=wait_msg.chat.id,
-            message_id=wait_msg.message_id,
-            text="❌ حدث خطأ أثناء تحميل الملف من تيليجرام."
-        )
-        return
+    # تحميل الملف
+    file_id = message.voice.file_id if message.content_type == "voice" else message.audio.file_id
+    file_info = bot.get_file(file_id)
+    file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
+    audio_bytes = requests.get(file_url).content
 
-    # تفريغ OpenAI
+    # تفريغ
     text = transcribe_openai(audio_bytes)
 
     if not text:
-        bot.edit_message_text(
-            chat_id=wait_msg.chat.id,
-            message_id=wait_msg.message_id,
-            text="❌ فشل التفريغ من OpenAI. تأكد من رصيد الـ API أو حاول لاحقًا."
-        )
-        return
+        return bot.edit_message_text("❌ فشل التفريغ.", wait_msg.chat.id, wait_msg.message_id)
 
-    # خصم الوقت
     users = load_users()
-    users[uid]["used"] = users[uid].get("used", 0) + duration
+    users[uid]["used"] += duration
     save_users(users)
 
     bot.edit_message_text(
-        chat_id=wait_msg.chat.id,
-        message_id=wait_msg.message_id,
-        text=(
-            f"✅ تم التفريغ بنجاح:\n\n"
-            f"{text}\n\n"
-            f"⏱ مدة التسجيل: {duration} ثانية.\n"
-            f"🔢 المجموع المستخدم حتى الآن: {users[uid]['used']} ثانية."
-        )
+        f"✅ تم التفريغ بنجاح:\n\n{text}\n\n⏱ المدة: {duration} ثانية.",
+        wait_msg.chat.id,
+        wait_msg.message_id,
     )
 
 
@@ -507,4 +335,4 @@ def handle_audio(message: telebot.types.Message):
 # تشغيل البوت
 # ==========================
 print("Bot is running...")
-bot.infinity_polling(skip_pending=True, timeout=60)
+bot.infinity_polling(skip_pending=True)
