@@ -8,11 +8,11 @@ from telebot import types
 # المتغيرات من Koyeb
 # ==========================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # مثال: 604494923
 
-if not BOT_TOKEN or not DEEPGRAM_API_KEY:
-    raise RuntimeError("❌ يجب ضبط BOT_TOKEN و DEEPGRAM_API_KEY في إعدادات Koyeb")
+if not BOT_TOKEN or not GROQ_API_KEY:
+    raise RuntimeError("❌ يجب ضبط BOT_TOKEN و GROQ_API_KEY في إعدادات Koyeb")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -112,10 +112,11 @@ def cmd_start(message: telebot.types.Message):
     bot.send_message(
         message.chat.id,
         "👋 أهلاً بك في الأسطورة للتفريغ الصوتي!\n\n"
-        "🎙 يدعم العربية 100% (Deepgram nova-2-general).\n"
+        "🎙 يعتمد على Groq – موديل *whisper-large-v3* مع دعم ممتاز للعربية.\n"
         "🎁 لديك 120 ثانية مجانية للتجربة.\n\n"
         "اختر من الأزرار بالأسفل أو أرسل مقطعًا صوتيًا مباشرة.",
         reply_markup=main_menu(is_admin=is_admin),
+        parse_mode="Markdown",
     )
 
 
@@ -168,6 +169,7 @@ def plan_selected(call: telebot.types.CallbackQuery):
             "username": username,
             "pending_plan": ""
         }
+
     users[uid]["pending_plan"] = str(minutes)
     save_users(users)
 
@@ -328,7 +330,7 @@ def process_add_time(message: telebot.types.Message):
         users = load_users()
         if uid not in users:
             ADMIN_STATE.pop(message.from_user.id)
-            return bot.reply_to(message, "❌ هذا المستخدم غير موجود في قاعدة البيانات.")
+            return bot.reply_to(message, "❌ هذا المستخدم غير موجود في قاعدة البيانات!")
 
         state["uid"] = uid
         state["step"] = 2
@@ -410,44 +412,35 @@ def handle_payment_screenshot(message: telebot.types.Message):
 
 
 # ==========================
-# Deepgram – nova-2-general
+# Groq – whisper-large-v3
 # ==========================
-def transcribe_deepgram(audio_bytes: bytes) -> str | None:
+def transcribe_groq(audio_bytes: bytes) -> str | None:
     """
-    تفريغ الصوت باستخدام Deepgram REST API (مودل nova-2-general)
-    يدعم العربية ومقاطع طويلة (أكبر من 25 ميغا).
+    تفريغ الصوت عبر Groq – موديل whisper-large-v3
+    مع التركيز على اللغة العربية.
     """
 
-    url = "https://api.deepgram.com/v1/listen"
+    url = "https://api.groq.com/openai/v1/audio/transcriptions"
 
-    headers = {
-        "Authorization": f"Token {DEEPGRAM_API_KEY}",
-        "Content-Type": "application/octet-stream",
+    files = {
+        "file": ("audio.wav", audio_bytes, "audio/wav"),
+        "model": (None, "whisper-large-v3"),
+        "response_format": (None, "text"),
+        "language": (None, "ar"),  # تركيز على العربية
     }
 
-    params = {
-        "model": "nova-2",
-        "language": "ar",        # 🔒 إجبار اللغة العربية
-        "smart_format": "true",
-        "punctuate": "true",
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}"
     }
 
     try:
-        resp = requests.post(
-            url,
-            headers=headers,
-            params=params,
-            data=audio_bytes,
-            timeout=600  # 10 دقائق مهلة للملفات الكبيرة
-        )
+        resp = requests.post(url, headers=headers, files=files, timeout=600)
         if resp.status_code != 200:
-            print("Deepgram error status:", resp.status_code, resp.text)
+            print("Groq error status:", resp.status_code, resp.text)
             return None
-
-        data = resp.json()
-        return data["results"]["channels"][0]["alternatives"][0]["transcript"]
+        return resp.text
     except Exception as e:
-        print("Deepgram error:", e)
+        print("Groq error:", e)
         return None
 
 
@@ -503,7 +496,7 @@ def handle_audio(message: telebot.types.Message):
             wait_msg.message_id,
         )
 
-    text = transcribe_deepgram(audio_bytes)
+    text = transcribe_groq(audio_bytes)
 
     if not text:
         return bot.edit_message_text(
