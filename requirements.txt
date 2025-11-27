@@ -1,5 +1,5 @@
-pyTelegramBotAPI
-requests
+pytelegrambotapi
 google-cloud-speech
-google-auth
-google-auth-oauthlib
+google-cloud-storage
+pydub
+requests
