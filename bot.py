@@ -435,15 +435,12 @@ def transcribe_deepgram(audio_bytes: bytes) -> str | None:
         "Authorization": f"Token {DEEPGRAM_API_KEY}",  
         "Content-Type": "application/octet-stream",  
     }  
-  
-    params = {  
-        "model": "nova-2",  
-        "smart_format": "true",  
-        "punctuate": "true",  
-        "detect_language": "true",  
-        "language": "ar",   # ✅ تركيز على العربية  
-        "diarize": "false",  
-    }  
+  params = {
+    "model": "nova-2-general",
+    "language": "ar",
+    "smart_format": "true",
+    "punctuate": "true"
+  }
   
     try:  
         resp = requests.post(  
