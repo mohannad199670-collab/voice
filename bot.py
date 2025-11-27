@@ -1,48 +1,35 @@
 import os
 import json
-import uuid
 import requests
 import telebot
 from telebot import types
 
-# Google Cloud
+# مكتبة جوجل
 from google.oauth2 import service_account
 from google.cloud import speech_v1p1beta1 as speech
-from google.cloud import storage
 
 # ==========================
 # المتغيرات من Koyeb
 # ==========================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # مثال: 604494923
 
-GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID")
-GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME")
+# ملف الخدمة (JSON) كاملاً كسلسلة
 GCP_SERVICE_ACCOUNT_JSON = os.getenv("GCP_SERVICE_ACCOUNT_JSON")
 
-if not BOT_TOKEN:
-    raise RuntimeError("❌ BOT_TOKEN غير مضبوط في إعدادات Koyeb")
-
-if not (GCP_PROJECT_ID and GCS_BUCKET_NAME and GCP_SERVICE_ACCOUNT_JSON):
+if not BOT_TOKEN or not GCP_SERVICE_ACCOUNT_JSON:
     raise RuntimeError(
-        "❌ يجب ضبط GCP_PROJECT_ID و GCS_BUCKET_NAME و GCP_SERVICE_ACCOUNT_JSON في إعدادات Koyeb"
+        "❌ يجب ضبط BOT_TOKEN و GCP_SERVICE_ACCOUNT_JSON في إعدادات Koyeb"
     )
 
-# تحميل بيانات الخدمة من الـ JSON المخزَّن في المتغير
-try:
-    service_account_info = json.loads(GCP_SERVICE_ACCOUNT_JSON)
-except Exception as e:
-    raise RuntimeError(f"❌ خطأ في قراءة GCP_SERVICE_ACCOUNT_JSON: {e}")
-
-credentials = service_account.Credentials.from_service_account_info(
-    service_account_info
-)
-
-# عمل Clients لجوجل
-speech_client = speech.SpeechClient(credentials=credentials)
-storage_client = storage.Client(credentials=credentials, project=GCP_PROJECT_ID)
-
 bot = telebot.TeleBot(BOT_TOKEN)
+
+# ==========================
+# تهيئة عميل Google STT
+# ==========================
+credentials_info = json.loads(GCP_SERVICE_ACCOUNT_JSON)
+credentials = service_account.Credentials.from_service_account_info(credentials_info)
+speech_client = speech.SpeechClient(credentials=credentials)
 
 # ==========================
 # ملف تخزين المستخدمين
@@ -140,8 +127,7 @@ def cmd_start(message: telebot.types.Message):
     bot.send_message(
         message.chat.id,
         "👋 أهلاً بك في الأسطورة للتفريغ الصوتي!\n\n"
-        "🎙 يعتمد الآن على Google Cloud Speech-to-Text.\n"
-        "🎙 يدعم العربية 100%، وملفات طويلة (عبر Google Cloud Storage).\n"
+        "🎙 يعتمد على Google Speech-to-Text ويدعم العربية 100%.\n"
         "🎁 لديك 120 ثانية مجانية للتجربة.\n\n"
         "اختر من الأزرار بالأسفل أو أرسل مقطعًا صوتيًا مباشرة.",
         reply_markup=main_menu(is_admin=is_admin),
@@ -227,7 +213,7 @@ FREE_LIMIT = 120  # 120 ثانية مجانية
 
 
 def seconds_to_minutes_str(seconds: int) -> str:
-    minutes = seconds / 60.0
+    minutes = seconds / 60.0 if seconds else 0
     return f"{seconds} ثانية ≈ {minutes:.2f} دقيقة"
 
 
@@ -267,7 +253,7 @@ def user_settings(message: telebot.types.Message):
 # ==========================
 # لوحة تحكم الأدمن (زر مستقل)
 # ==========================
-ADMIN_STATE: dict[int, dict] = {}  # لحالة إضافة الوقت التفاعلي للأدمن
+ADMIN_STATE = {}  # لحالة إضافة الوقت التفاعلي للأدمن
 
 
 @bot.message_handler(func=lambda m: m.text == "🛠 لوحة التحكم")
@@ -449,45 +435,55 @@ def handle_payment_screenshot(message: telebot.types.Message):
 
 
 # ==========================
-# Google Cloud Speech-to-Text + Storage
+# Google STT – دالة التفريغ
 # ==========================
+def transcribe_google(audio_bytes: bytes, is_ogg: bool, is_long: bool) -> str | None:
+    """
+    تفريغ باستخدام Google Speech-to-Text
+    - يدعم العربية
+    - تعيين encoding و sample_rate_hertz لتفادي خطأ Opus 0
+    """
 
-def upload_audio_to_gcs(audio_bytes: bytes, blob_name: str) -> str:
-    """
-    يرفع ملف الصوت إلى Google Cloud Storage ويعيد رابط gs://
-    """
-    bucket = storage_client.bucket(GCS_BUCKET_NAME)
-    blob = bucket.blob(blob_name)
-    blob.upload_from_string(audio_bytes)
-    return f"gs://{GCS_BUCKET_NAME}/{blob_name}"
-
-
-def transcribe_google(gcs_uri: str, encoding_enum) -> str | None:
-    """
-    تفريغ الصوت عبر Google Cloud Speech-to-Text (LongRunningRecognize)
-    يدعم العربية والملفات الطويلة.
-    """
-    audio = speech.RecognitionAudio(uri=gcs_uri)
+    if is_ogg:
+        encoding = speech.RecognitionConfig.AudioEncoding.OGG_OPUS
+        sample_rate = 48000  # 48k للـ Opus في تيليجرام
+    else:
+        encoding = speech.RecognitionConfig.AudioEncoding.ENCODING_UNSPECIFIED
+        sample_rate = 0  # نتركه ليكتشف تلقائيًا
 
     config = speech.RecognitionConfig(
-        encoding=encoding_enum,
-        language_code="ar",
+        encoding=encoding,
+        sample_rate_hertz=sample_rate if sample_rate > 0 else None,
+        language_code="ar",  # العربية
         enable_automatic_punctuation=True,
         model="default",
     )
 
-    try:
-        operation = speech_client.long_running_recognize(
-            request={"config": config, "audio": audio}
-        )
-        response = operation.result(timeout=3600)  # حتى ساعة انتظار للملفات الكبيرة
+    audio = speech.RecognitionAudio(content=audio_bytes)
 
-        full_text = []
+    try:
+        # لو المدة طويلة نستخدم long_running_recognize
+        if is_long:
+            operation = speech_client.long_running_recognize(
+                config=config,
+                audio=audio,
+            )
+            response = operation.result(timeout=3600)
+        else:
+            response = speech_client.recognize(
+                config=config,
+                audio=audio,
+            )
+
+        texts = []
         for result in response.results:
             if result.alternatives:
-                full_text.append(result.alternatives[0].transcript)
+                texts.append(result.alternatives[0].transcript)
 
-        return "\n".join(full_text).strip() if full_text else None
+        full_text = "\n".join(texts).strip()
+        if not full_text:
+            return None
+        return full_text
 
     except Exception as e:
         print("Google STT error:", e)
@@ -517,14 +513,12 @@ def handle_audio(message: telebot.types.Message):
     if message.content_type == "voice":
         duration = message.voice.duration or 0
         file_id = message.voice.file_id
-        encoding_enum = speech.RecognitionConfig.AudioEncoding.OGG_OPUS
-        ext = "ogg"
+        is_ogg = True
     else:
         duration = message.audio.duration or 0
         file_id = message.audio.file_id
-        # غالباً MP3 من تيليجرام
-        encoding_enum = speech.RecognitionConfig.AudioEncoding.MP3
-        ext = "mp3"
+        # نفترض أحياناً يكون OGG أيضاً، لكن مبدئياً:
+        is_ogg = True  # أغلب الملفات من تيليجرام تكون OGG/Opus
 
     used = users[uid].get("used", 0)
     paid = users[uid].get("paid", 0)
@@ -538,7 +532,7 @@ def handle_audio(message: telebot.types.Message):
             "📄 يمكنك شراء باقة من قسم الاشتراكات."
         )
 
-    wait_msg = bot.reply_to(message, "⏳ جاري تحميل الملف وبدء التفريغ…")
+    wait_msg = bot.reply_to(message, "⏳ جاري التفريغ…")
 
     # تحميل الملف من تيليجرام
     try:
@@ -553,20 +547,11 @@ def handle_audio(message: telebot.types.Message):
             wait_msg.message_id,
         )
 
-    # رفع الملف إلى GCS
-    try:
-        blob_name = f"telegram/{uid}_{uuid.uuid4().hex}.{ext}"
-        gcs_uri = upload_audio_to_gcs(audio_bytes, blob_name)
-    except Exception as e:
-        print("GCS upload error:", e)
-        return bot.edit_message_text(
-            "❌ حدث خطأ أثناء رفع الملف إلى Google Cloud Storage.",
-            wait_msg.chat.id,
-            wait_msg.message_id,
-        )
+    # نعتبر أن ما فوق 60 ثانية = طويل → long_running
+    is_long = duration > 60
 
-    # تفريغ عبر Google STT
-    text = transcribe_google(gcs_uri, encoding_enum)
+    # تفريغ عبر Google
+    text = transcribe_google(audio_bytes, is_ogg=is_ogg, is_long=is_long)
 
     if not text:
         # لا نخصم أي وقت هنا
