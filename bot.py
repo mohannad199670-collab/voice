@@ -1,21 +1,24 @@
 import os
 import json
 import requests
+import subprocess
+import tempfile
+
 import telebot
 from telebot import types
 
-import tempfile
-import subprocess
-
-# مكتبات جوجل
+# مكتبة جوجل STT
 from google.oauth2 import service_account
 from google.cloud import speech_v1p1beta1 as speech
+
 
 # ==========================
 # المتغيرات من Koyeb
 # ==========================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # مثال: 604494923
+
+# ملف الخدمة (JSON) كاملاً كسلسلة
 GCP_SERVICE_ACCOUNT_JSON = os.getenv("GCP_SERVICE_ACCOUNT_JSON")
 
 if not BOT_TOKEN or not GCP_SERVICE_ACCOUNT_JSON:
@@ -25,12 +28,14 @@ if not BOT_TOKEN or not GCP_SERVICE_ACCOUNT_JSON:
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
+
 # ==========================
 # تهيئة عميل Google STT
 # ==========================
 credentials_info = json.loads(GCP_SERVICE_ACCOUNT_JSON)
 credentials = service_account.Credentials.from_service_account_info(credentials_info)
 speech_client = speech.SpeechClient(credentials=credentials)
+
 
 # ==========================
 # ملف تخزين المستخدمين
@@ -63,7 +68,7 @@ def ensure_user(uid: str, username: str | None = None):
             "used": 0,          # الثواني المستخدمة
             "paid": 0,          # الثواني المدفوعة
             "username": username or "",
-            "pending_plan": ""  # الخطة المطلوبة قبل الدفع (مثال: "60" أو "120" ...)
+            "pending_plan": ""  # الخطة المطلوبة قبل الدفع (دقائق كنص: "60" أو "120"...)
         }
         save_users(users)
     else:
@@ -113,6 +118,7 @@ PAYEER_MESSAGE = (
     "بعد الدفع يرجى إرسال لقطة شاشة هنا في المحادثة مع البوت."
 )
 
+
 # ==========================
 # /start
 # ==========================
@@ -133,6 +139,7 @@ def cmd_start(message: telebot.types.Message):
         reply_markup=main_menu(is_admin=is_admin),
     )
 
+
 # ==========================
 # 📞 تواصل معنا
 # ==========================
@@ -145,6 +152,7 @@ def contact_us(message: telebot.types.Message):
         message.chat.id,
         f"📞 للتواصل مع المطوّر:\n{CONTACT_USERNAME}"
     )
+
 
 # ==========================
 # 📄 الاشتراكات
@@ -181,8 +189,6 @@ def plan_selected(call: telebot.types.CallbackQuery):
             "username": username,
             "pending_plan": ""
         }
-
-    # حفظ الخطة المختارة
     users[uid]["pending_plan"] = str(minutes)
     save_users(users)
 
@@ -204,6 +210,7 @@ def pay_usdt(call: telebot.types.CallbackQuery):
 def pay_payeer(call: telebot.types.CallbackQuery):
     bot.answer_callback_query(call.id)
     bot.send_message(call.message.chat.id, PAYEER_MESSAGE)
+
 
 # ==========================
 # ⚙️ الإعدادات (للجميع)
@@ -247,6 +254,7 @@ def user_settings(message: telebot.types.Message):
         text += "\n\n👑 أنت مدير البوت، يمكنك فتح 🛠 لوحة التحكم من الزر الخاص بذلك."
 
     bot.send_message(message.chat.id, text, parse_mode="HTML")
+
 
 # ==========================
 # لوحة تحكم الأدمن (زر مستقل)
@@ -384,6 +392,7 @@ def process_add_time(message: telebot.types.Message):
         kb.row("↩️ رجوع")
         return bot.send_message(message.chat.id, "🔧 عدت إلى لوحة التحكم.", reply_markup=kb)
 
+
 # ==========================
 # استقبال لقطات الشاشة (الدفع)
 # ==========================
@@ -430,65 +439,40 @@ def handle_payment_screenshot(message: telebot.types.Message):
         except Exception as e:
             print("Forward error:", e)
 
+
 # ==========================
-# Google STT – استخدام FFmpeg لتحويل الصوت إلى WAV 16kHz
+# Google STT – دالة التفريغ عبر WAV
 # ==========================
-def transcribe_google_with_ffmpeg(raw_bytes: bytes, input_ext: str, is_long: bool) -> str | None:
+def transcribe_google_wav(wav_bytes: bytes, is_long: bool) -> str | None:
     """
-    يأخذ بايتات الصوت بأي صيغة (ogg/mp3/...) → يحولها بـ FFmpeg إلى WAV 16kHz Mono
-    ثم يرسلها إلى Google Speech-to-Text مع encoding LINEAR16 و language_code="ar"
+    تفريغ باستخدام Google Speech-to-Text
+    - يتم إرسال WAV 16kHz Mono بتشفير LINEAR16
+    - يدعم العربية
+    - is_long: لو المدة طويلة نستخدم long_running_recognize
     """
 
-    # نستخدم مجلد مؤقت
-    with tempfile.TemporaryDirectory() as tmpdir:
-        input_path = os.path.join(tmpdir, "input" + input_ext)
-        output_path = os.path.join(tmpdir, "output.wav")
-
-        # حفظ الملف الأصلي
-        with open(input_path, "wb") as f:
-            f.write(raw_bytes)
-
-        # استدعاء ffmpeg لتحويله إلى WAV 16kHz Mono
-        try:
-            cmd = [
-                "ffmpeg",
-                "-y",
-                "-i", input_path,
-                "-ac", "1",         # قناة واحدة
-                "-ar", "16000",     # 16kHz
-                output_path,
-            ]
-            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception as e:
-            print("FFmpeg error:", e)
-            return None
-
-        # قراءة الـ WAV الناتج
-        try:
-            with open(output_path, "rb") as f:
-                wav_data = f.read()
-        except Exception as e:
-            print("Read WAV error:", e)
-            return None
-
-    # إعدادات Google STT
     config = speech.RecognitionConfig(
         encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
         sample_rate_hertz=16000,
-        language_code="ar",  # العربية عامة
+        language_code="ar",  # العربية
         enable_automatic_punctuation=True,
         model="default",
     )
 
-    audio = speech.RecognitionAudio(content=wav_data)
+    audio = speech.RecognitionAudio(content=wav_bytes)
 
     try:
-        # إذا المقطع طويل (أطول من 60 ثانية) نستخدم long_running_recognize
         if is_long:
-            operation = speech_client.long_running_recognize(config=config, audio=audio)
+            operation = speech_client.long_running_recognize(
+                config=config,
+                audio=audio,
+            )
             response = operation.result(timeout=3600)
         else:
-            response = speech_client.recognize(config=config, audio=audio)
+            response = speech_client.recognize(
+                config=config,
+                audio=audio,
+            )
 
         texts = []
         for result in response.results:
@@ -503,6 +487,7 @@ def transcribe_google_with_ffmpeg(raw_bytes: bytes, input_ext: str, is_long: boo
     except Exception as e:
         print("Google STT error:", e)
         return None
+
 
 # ==========================
 # 🎧 تفريغ صوت
@@ -523,7 +508,7 @@ def handle_audio(message: telebot.types.Message):
     ensure_user(uid, username)
     users = load_users()
 
-    # حساب المدة والـ file_id
+    # حساب المدة
     if message.content_type == "voice":
         duration = message.voice.duration or 0
         file_id = message.voice.file_id
@@ -545,15 +530,11 @@ def handle_audio(message: telebot.types.Message):
 
     wait_msg = bot.reply_to(message, "⏳ جاري التفريغ…")
 
-    # تحميل الملف من تيليجرام
+    # 1) تحميل الملف من تيليجرام
     try:
         file_info = bot.get_file(file_id)
-        file_path = file_info.file_path
-        url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+        url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
         audio_bytes = requests.get(url, timeout=600).content
-        _, ext = os.path.splitext(file_path)
-        if not ext:
-            ext = ".ogg"  # احتياطاً
     except Exception as e:
         print("Download error:", e)
         return bot.edit_message_text(
@@ -562,11 +543,54 @@ def handle_audio(message: telebot.types.Message):
             wait_msg.message_id,
         )
 
-    # نعتبر أن ما فوق 60 ثانية = طويل
+    # 2) تحويل عبر FFmpeg إلى WAV 16kHz Mono
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp_in:
+            tmp_in.write(audio_bytes)
+            tmp_in_path = tmp_in.name
+
+        tmp_out_fd, tmp_out_path = tempfile.mkstemp(suffix=".wav")
+        os.close(tmp_out_fd)
+
+        # ffmpeg -i input -ar 16000 -ac 1 output.wav
+        ffmpeg_cmd = [
+            "ffmpeg",
+            "-y",
+            "-i", tmp_in_path,
+            "-ar", "16000",
+            "-ac", "1",
+            "-f", "wav",
+            tmp_out_path,
+        ]
+        subprocess.run(ffmpeg_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+
+        with open(tmp_out_path, "rb") as f_wav:
+            wav_bytes = f_wav.read()
+
+    except subprocess.CalledProcessError as e:
+        print("FFmpeg error:", e)
+        # لا نخصم وقت
+        return bot.edit_message_text(
+            "❌ حدث خطأ أثناء تحويل الملف الصوتي.\n"
+            "🔁 حاول إرسال ملف آخر.",
+            wait_msg.chat.id,
+            wait_msg.message_id,
+        )
+    finally:
+        # تنظيف الملفات المؤقتة
+        try:
+            if 'tmp_in_path' in locals() and os.path.exists(tmp_in_path):
+                os.remove(tmp_in_path)
+            if 'tmp_out_path' in locals() and os.path.exists(tmp_out_path):
+                os.remove(tmp_out_path)
+        except Exception:
+            pass
+
+    # 3) نعتبر أن ما فوق 60 ثانية = طويل → long_running
     is_long = duration > 60
 
-    # تفريغ عبر Google + FFmpeg
-    text = transcribe_google_with_ffmpeg(audio_bytes, input_ext=ext, is_long=is_long)
+    # 4) تفريغ عبر Google STT
+    text = transcribe_google_wav(wav_bytes, is_long=is_long)
 
     if not text:
         # لا نخصم أي وقت هنا
@@ -577,7 +601,7 @@ def handle_audio(message: telebot.types.Message):
             wait_msg.message_id,
         )
 
-    # خصم الوقت فقط عند النجاح
+    # 5) خصم الوقت فقط عند النجاح
     users = load_users()
     users[uid]["used"] = users[uid].get("used", 0) + duration
     save_users(users)
