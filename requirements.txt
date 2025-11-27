@@ -1,4 +1,5 @@
 pyTelegramBotAPI
-google-cloud-speech
-google-cloud-storage
 requests
+google-cloud-speech
+google-auth
+google-auth-oauthlib
