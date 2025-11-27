@@ -437,32 +437,30 @@ def handle_payment_screenshot(message: telebot.types.Message):
 # ==========================
 # Google STT – دالة التفريغ
 # ==========================
-def transcribe_google(audio_bytes: bytes, is_ogg: bool, is_long: bool) -> str | None:
+def transcribe_google(audio_bytes: bytes,
+                      encoding: speech.RecognitionConfig.AudioEncoding,
+                      sample_rate_hz: int | None,
+                      is_long: bool) -> str | None:
     """
     تفريغ باستخدام Google Speech-to-Text
-    - يدعم العربية
-    - تعيين encoding و sample_rate_hertz لتفادي خطأ Opus 0
+    - نحدد الـ encoding حسب نوع الملف (OGG_OPUS أو MP3)
+    - sample_rate_hz يضبط عند الحاجة فقط
     """
 
-    if is_ogg:
-        encoding = speech.RecognitionConfig.AudioEncoding.OGG_OPUS
-        sample_rate = 48000  # 48k للـ Opus في تيليجرام
-    else:
-        encoding = speech.RecognitionConfig.AudioEncoding.ENCODING_UNSPECIFIED
-        sample_rate = 0  # نتركه ليكتشف تلقائيًا
+    config_kwargs = {
+        "encoding": encoding,
+        "language_code": "ar-EG",   # عربي مصري / فصيح
+        "enable_automatic_punctuation": True,
+        "model": "default",
+    }
 
-    config = speech.RecognitionConfig(
-        encoding=encoding,
-        sample_rate_hertz=sample_rate if sample_rate > 0 else None,
-        language_code="ar",  # العربية
-        enable_automatic_punctuation=True,
-        model="default",
-    )
+    if sample_rate_hz:
+        config_kwargs["sample_rate_hertz"] = sample_rate_hz
 
+    config = speech.RecognitionConfig(**config_kwargs)
     audio = speech.RecognitionAudio(content=audio_bytes)
 
     try:
-        # لو المدة طويلة نستخدم long_running_recognize
         if is_long:
             operation = speech_client.long_running_recognize(
                 config=config,
@@ -509,16 +507,33 @@ def handle_audio(message: telebot.types.Message):
     ensure_user(uid, username)
     users = load_users()
 
-    # حساب المدة
+    # حساب المدة وتحديد نوع الملف
     if message.content_type == "voice":
         duration = message.voice.duration or 0
         file_id = message.voice.file_id
-        is_ogg = True
+        encoding = speech.RecognitionConfig.AudioEncoding.OGG_OPUS
+        sample_rate_hz = 48000
     else:
         duration = message.audio.duration or 0
         file_id = message.audio.file_id
-        # نفترض أحياناً يكون OGG أيضاً، لكن مبدئياً:
-        is_ogg = True  # أغلب الملفات من تيليجرام تكون OGG/Opus
+
+        # محاولة كشف النوع من mime_type أو الامتداد
+        mime = (message.audio.mime_type or "").lower() if message.audio.mime_type else ""
+        is_mp3 = "mp3" in mime
+
+        # جلب مسار الملف لمعرفة الامتداد
+        file_info_temp = bot.get_file(file_id)
+        path_lower = file_info_temp.file_path.lower() if file_info_temp.file_path else ""
+        if path_lower.endswith(".mp3"):
+            is_mp3 = True
+
+        if is_mp3:
+            encoding = speech.RecognitionConfig.AudioEncoding.MP3
+            sample_rate_hz = 44100
+        else:
+            # نفترض OGG/Opus
+            encoding = speech.RecognitionConfig.AudioEncoding.OGG_OPUS
+            sample_rate_hz = 48000
 
     used = users[uid].get("used", 0)
     paid = users[uid].get("paid", 0)
@@ -551,7 +566,12 @@ def handle_audio(message: telebot.types.Message):
     is_long = duration > 60
 
     # تفريغ عبر Google
-    text = transcribe_google(audio_bytes, is_ogg=is_ogg, is_long=is_long)
+    text = transcribe_google(
+        audio_bytes=audio_bytes,
+        encoding=encoding,
+        sample_rate_hz=sample_rate_hz,
+        is_long=is_long,
+    )
 
     if not text:
         # لا نخصم أي وقت هنا
