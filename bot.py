@@ -435,6 +435,7 @@ def transcribe_deepgram(audio_bytes: bytes) -> str | None:
         "Authorization": f"Token {DEEPGRAM_API_KEY}",  
         "Content-Type": "application/octet-stream",  
     }  
+  
   params = {
     "model": "nova-2-general",
     "language": "ar",
