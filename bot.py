@@ -38,7 +38,8 @@ def save_users(data):
 
 def ensure_user(uid: str, username: str | None = None):
     """
-    إنشاء أو تحديث مستخدم في قاعدة البيانات.
+    يتأكد أن المستخدم موجود في users.json
+    ويحدّث اليوزرنيم إذا تغيّر.
     """
     users = load_users()
     if uid not in users:
@@ -46,11 +47,10 @@ def ensure_user(uid: str, username: str | None = None):
             "used": 0,          # الثواني المستخدمة
             "paid": 0,          # الثواني المدفوعة
             "username": username or "",
-            "pending_plan": ""  # الخطة التي اختارها قبل إرسال لقطة الدفع
+            "pending_plan": ""  # الخطة المطلوبة قبل الدفع (دقائق كنص: "60" أو "120"...)
         }
         save_users(users)
     else:
-        # تحديث اليوزرنيم إذا تغيّر
         if username:
             users[uid]["username"] = username
             save_users(users)
@@ -58,12 +58,12 @@ def ensure_user(uid: str, username: str | None = None):
 
 
 # ==========================
-# لوحة البداية
+# لوحة البداية (القائمة الرئيسية)
 # ==========================
 def main_menu(is_admin: bool = False):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("🎧 تفريغ صوت", "📄 الاشتراكات")
-    kb.row("⚙️ الإعدادات", "📞 اتصل بنا")
+    kb.row("⚙️ الإعدادات", "📞 تواصل معنا")
     if is_admin:
         kb.row("🛠 لوحة التحكم")
     return kb
@@ -109,24 +109,10 @@ def cmd_start(message: telebot.types.Message):
 
     is_admin = (message.from_user.id == ADMIN_ID)
 
-    # إشعار للأدمن عند دخول مستخدم جديد
-    if ADMIN_ID and message.from_user.id != ADMIN_ID:
-        try:
-            uname_text = f"@{username}" if username else "بدون Username"
-            bot.send_message(
-                ADMIN_ID,
-                f"📥 مستخدم جديد /start\n"
-                f"🆔 ID: <code>{uid}</code>\n"
-                f"👤 Username: {uname_text}",
-                parse_mode="HTML",
-            )
-        except Exception:
-            pass
-
     bot.send_message(
         message.chat.id,
         "👋 أهلاً بك في الأسطورة للتفريغ الصوتي!\n\n"
-        "🎙 يعتمد على Deepgram (يدعم العربية والدقة العالية).\n"
+        "🎙 يدعم العربية 100% (Deepgram nova-2).\n"
         "🎁 لديك 120 ثانية مجانية للتجربة.\n\n"
         "اختر من الأزرار بالأسفل أو أرسل مقطعًا صوتيًا مباشرة.",
         reply_markup=main_menu(is_admin=is_admin),
@@ -134,19 +120,21 @@ def cmd_start(message: telebot.types.Message):
 
 
 # ==========================
-# 📞 اتصل بنا (للجميع + للأدمن)
+# 📞 تواصل معنا
 # ==========================
-@bot.message_handler(func=lambda m: m.text == "📞 اتصل بنا")
+CONTACT_USERNAME = "@moh1ali96"
+
+
+@bot.message_handler(func=lambda m: m.text == "📞 تواصل معنا")
 def contact_us(message: telebot.types.Message):
-    bot.reply_to(
-        message,
-        "📩 للتواصل المباشر:\n"
-        "@moh1ali96"
+    bot.send_message(
+        message.chat.id,
+        f"📞 للتواصل مع المطوّر:\n{CONTACT_USERNAME}"
     )
 
 
 # ==========================
-# الاشتراكات
+# 📄 الاشتراكات
 # ==========================
 @bot.message_handler(func=lambda m: m.text == "📄 الاشتراكات")
 def show_plans(message: telebot.types.Message):
@@ -170,9 +158,9 @@ def plan_selected(call: telebot.types.CallbackQuery):
 
     uid = str(call.from_user.id)
     username = call.from_user.username or ""
-    ensure_user(uid, username)
+    users = ensure_user(uid, username)
 
-    # حفظ الخطة المختارة داخل pending_plan
+    # إعادة تحميل وتعديل وحفظ
     users = load_users()
     if uid not in users:
         users[uid] = {
@@ -181,8 +169,7 @@ def plan_selected(call: telebot.types.CallbackQuery):
             "username": username,
             "pending_plan": ""
         }
-
-    users[uid]["pending_plan"] = str(minutes)  # حفظ عدد الدقائق كـ نص
+    users[uid]["pending_plan"] = str(minutes)
     save_users(users)
 
     bot.edit_message_text(
@@ -212,11 +199,8 @@ FREE_LIMIT = 120  # 120 ثانية مجانية
 
 
 def seconds_to_minutes_str(seconds: int) -> str:
-    """
-    تحويل ثواني إلى نص بالدقائق (تقريب بسيط مع رقمين بعد الفاصلة).
-    """
     minutes = seconds / 60.0
-    return f"{minutes:.2f} دقيقة"
+    return f"{seconds} ثانية ≈ {minutes:.2f} دقيقة"
 
 
 @bot.message_handler(func=lambda m: m.text == "⚙️ الإعدادات")
@@ -224,27 +208,30 @@ def user_settings(message: telebot.types.Message):
     uid = str(message.from_user.id)
     username = message.from_user.username or ""
     ensure_user(uid, username)
-
     users = load_users()
     data = users.get(uid, {"used": 0, "paid": 0})
-    used = int(data.get("used", 0))
-    paid = int(data.get("paid", 0))
+    used = data.get("used", 0)
+    paid = data.get("paid", 0)
 
     remaining = max(0, FREE_LIMIT + paid - used)
 
-    uname_text = f"@{username}" if username else "بدون Username"
-
-    text = (
-        "⚙️ إعدادات حسابك:\n\n"
+    header = (
+        f"⚙️ إعدادات حسابك:\n\n"
         f"🆔 ID: <code>{uid}</code>\n"
-        f"👤 Username: {uname_text}\n\n"
-        f"⏱ الوقت المستخدم: {used} ثانية = {seconds_to_minutes_str(used)}\n"
-        f"🎁 الوقت المدفوع المتاح: {paid} ثانية = {seconds_to_minutes_str(paid)}\n"
-        f"✅ المجموع المتاح الآن: {remaining} ثانية = {seconds_to_minutes_str(remaining)}"
     )
+    if username:
+        header += f"👤 Username: @{username}\n"
+    else:
+        header += "👤 بدون Username\n"
+
+    text = header
+    text += "\n"
+    text += f"⏱ الوقت المستخدم: {seconds_to_minutes_str(used)}\n"
+    text += f"🎁 الوقت المدفوع المتاح: {seconds_to_minutes_str(paid)}\n"
+    text += f"✅ المجموع المتاح الآن: {seconds_to_minutes_str(remaining)}"
 
     if message.from_user.id == ADMIN_ID:
-        text += "\n\n👑 أنت مدير البوت، يمكنك فتح 🛠 لوحة التحكم من الزر المخصص."
+        text += "\n\n👑 أنت مدير البوت، يمكنك فتح 🛠 لوحة التحكم من الزر الخاص بذلك."
 
     bot.send_message(message.chat.id, text, parse_mode="HTML")
 
@@ -252,7 +239,7 @@ def user_settings(message: telebot.types.Message):
 # ==========================
 # لوحة تحكم الأدمن (زر مستقل)
 # ==========================
-ADMIN_STATE = {}  # لتخزين حالة إضافة الوقت التفاعلية
+ADMIN_STATE = {}  # لحالة إضافة الوقت التفاعلي للأدمن
 
 
 @bot.message_handler(func=lambda m: m.text == "🛠 لوحة التحكم")
@@ -271,7 +258,6 @@ def admin_menu(message: telebot.types.Message):
 # زر رجوع
 @bot.message_handler(func=lambda m: m.text == "↩️ رجوع")
 def admin_back(message: telebot.types.Message):
-    # لو الأدمن داخل عملية إضافة وقت → نحذف حالته
     if message.from_user.id in ADMIN_STATE:
         ADMIN_STATE.pop(message.from_user.id)
 
@@ -291,18 +277,14 @@ def admin_stats(message: telebot.types.Message):
 
     users = load_users()
     total_users = len(users)
-    total_used = sum(int(u.get("used", 0)) for u in users.values())
-    total_paid = sum(int(u.get("paid", 0)) for u in users.values())
-    total_available = FREE_LIMIT * total_users + total_paid - total_used
-    if total_available < 0:
-        total_available = 0
+    total_used = sum(u.get("used", 0) for u in users.values())
+    total_paid = sum(u.get("paid", 0) for u in users.values())
 
     text = (
         "📊 إحصائيات البوت:\n\n"
-        f"👥 عدد المستخدمين: {total_users}\n\n"
-        f"⏱ مجموع الوقت المستخدم: {total_used} ثانية = {seconds_to_minutes_str(total_used)}\n"
-        f"🎁 مجموع الوقت المدفوع المسجَّل: {total_paid} ثانية = {seconds_to_minutes_str(total_paid)}\n"
-        f"✅ المجموع المتاح (لجميع المستخدمين): {total_available} ثانية = {seconds_to_minutes_str(total_available)}"
+        f"👥 عدد المستخدمين: {total_users}\n"
+        f"⏱ مجموع الوقت المستخدم: {seconds_to_minutes_str(total_used)}\n"
+        f"🎁 مجموع الوقت المدفوع المسجَّل: {seconds_to_minutes_str(total_paid)}"
     )
 
     bot.send_message(message.chat.id, text)
@@ -321,17 +303,17 @@ def list_users(message: telebot.types.Message):
     lines = ["📃 قائمة المستخدمين:\n"]
     for uid, data in users.items():
         uname = data.get("username") or "بدون Username"
-        paid = int(data.get("paid", 0))
-        used = int(data.get("used", 0))
+        paid = data.get("paid", 0)
+        used = data.get("used", 0)
         lines.append(
-            f"🆔 {uid} – @{uname} – مدفوع: {paid} ث ({seconds_to_minutes_str(paid)}) – مستخدم: {used} ث ({seconds_to_minutes_str(used)})"
+            f"🆔 {uid} – @{uname} – مدفوع: {paid} ث – مستخدم: {used} ث"
         )
 
     txt = "\n".join(lines)
     bot.send_message(message.chat.id, txt)
 
 
-# ➕ إضافة وقت – فتح الخطوة من زر
+# ➕ إضافة وقت – الخطوة الأولى
 @bot.message_handler(func=lambda m: m.text == "➕ إضافة وقت")
 def ask_user_id(message: telebot.types.Message):
     if message.from_user.id != ADMIN_ID:
@@ -342,17 +324,8 @@ def ask_user_id(message: telebot.types.Message):
     bot.reply_to(message, "🆔 أرسل الآن ID المستخدم المراد إضافة وقت له:")
 
 
-# إضافة وقت من خلال /add_time أيضاً (يفتح نفس النظام التفاعلي)
-@bot.message_handler(commands=["add_time"])
-def add_time_cmd(message: telebot.types.Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    ADMIN_STATE[message.from_user.id] = {"step": 1, "uid": ""}
-    bot.reply_to(message, "🆔 أرسل الآن ID المستخدم المراد إضافة وقت له:")
-
-
-# نظام إضافة الوقت التفاعلي الكامل
-@bot.message_handler(func=lambda m: m.from_user.id in ADMIN_STATE)
+# نظام إضافة الوقت التفاعلي
+@bot.message_handler(func=lambda m: m.from_user.id in ADMIN_STATE, content_types=["text"])
 def process_add_time(message: telebot.types.Message):
     state = ADMIN_STATE[message.from_user.id]
 
@@ -381,14 +354,13 @@ def process_add_time(message: telebot.types.Message):
             ADMIN_STATE.pop(message.from_user.id)
             return bot.reply_to(message, "❌ المستخدم اختفى من قاعدة البيانات!")
 
-        add_seconds = minutes * 60
-        users[uid]["paid"] = users[uid].get("paid", 0) + add_seconds
+        users[uid]["paid"] = users[uid].get("paid", 0) + minutes * 60
         save_users(users)
 
         bot.send_message(
             message.chat.id,
-            f"✔ تم إضافة {minutes} دقيقة ({add_seconds} ثانية) للمستخدم {uid}.\n"
-            f"إجمالي الوقت المدفوع الآن: {users[uid]['paid']} ثانية = {seconds_to_minutes_str(users[uid]['paid'])}.",
+            f"✔ تم إضافة {minutes} دقيقة للمستخدم {uid}.\n"
+            f"إجمالي الوقت المدفوع الآن: {seconds_to_minutes_str(users[uid]['paid'])}.",
         )
 
         # إزالة الحالة والعودة للوحة التحكم
@@ -409,22 +381,17 @@ def handle_payment_screenshot(message: telebot.types.Message):
     uid = str(message.from_user.id)
     username = message.from_user.username or ""
     ensure_user(uid, username)
-
     users = load_users()
     data = users.get(uid, {})
     pending_plan = data.get("pending_plan", "")
 
     plan_text = "غير محددة"
-    minutes_num = 0
     if pending_plan == "60":
-        plan_text = "باقة 60 دقيقة (5$)"
-        minutes_num = 60
+        plan_text = "باقة 60 دقيقة (5$) – 60 دقيقة"
     elif pending_plan == "120":
-        plan_text = "باقة 120 دقيقة (9$)"
-        minutes_num = 120
+        plan_text = "باقة 120 دقيقة (9$) – 120 دقيقة"
     elif pending_plan == "300":
-        plan_text = "باقة 300 دقيقة (20$)"
-        minutes_num = 300
+        plan_text = "باقة 300 دقيقة (20$) – 300 دقيقة"
 
     # تنبيه المستخدم
     bot.reply_to(
@@ -435,60 +402,64 @@ def handle_payment_screenshot(message: telebot.types.Message):
 
     # إرسال للأدمن
     if ADMIN_ID:
-        uname_text = f"@{username}" if username else "بدون Username"
         caption = (
             "💳 إشعار دفع جديد:\n\n"
             f"🆔 ID: <code>{uid}</code>\n"
-            f"👤 Username: {uname_text}\n"
-            f"📦 الخطة المطلوبة: {plan_text}\n"
-            f"⏱ الدقائق المطلوبة: {minutes_num} دقيقة"
         )
+        if username:
+            caption += f"👤 Username: @{username}\n"
+        else:
+            caption += "👤 بدون Username\n"
+
+        caption += f"📦 الخطة المطلوبة: {plan_text}"
 
         try:
-            # إعادة توجيه لقطة الشاشة للأدمن
             bot.forward_message(ADMIN_ID, message.chat.id, message.message_id)
-            # إرسال تفاصيل جانبية
             bot.send_message(ADMIN_ID, caption, parse_mode="HTML")
         except Exception as e:
             print("Forward error:", e)
 
 
 # ==========================
-# Deepgram REST API – التفريغ
+# Deepgram – nova-2
 # ==========================
-def transcribe_deepgram(audio_bytes: bytes, mimetype: str = "audio/ogg") -> str | None:
+def transcribe_deepgram(audio_bytes: bytes) -> str | None:
     """
-    تفريغ الصوت باستخدام Deepgram REST API
-    يدعم العربية والملفات الكبيرة.
+    تفريغ الصوت باستخدام Deepgram REST API (مودل nova-2)
+    يدعم العربية ومقاطع طويلة (أكبر من 25 ميغا).
     """
 
     url = "https://api.deepgram.com/v1/listen"
 
     headers = {
         "Authorization": f"Token {DEEPGRAM_API_KEY}",
-        "Content-Type": mimetype,
+        "Content-Type": "application/octet-stream",
     }
 
     params = {
-        "punctuate": "true",
-        "model": "nova-2",          # نموذج قوي ودقيق
+        "model": "nova-2",
         "smart_format": "true",
-        "language": "ar",           # تركيز على العربية
-        "detect_language": "true",  # مع ذلك يسمح بالكشف
-        "multilingual": "true",
+        "punctuate": "true",
+        "detect_language": "true",
+        "diarize": "false",
     }
 
     try:
-        resp = requests.post(url, headers=headers, params=params, data=audio_bytes, timeout=300)
+        resp = requests.post(
+            url,
+            headers=headers,
+            params=params,
+            data=audio_bytes,
+            timeout=600  # 10 دقائق مهلة للملفات الكبيرة
+        )
         if resp.status_code != 200:
-            print("Deepgram error:", resp.status_code, resp.text)
+            print("Deepgram error status:", resp.status_code, resp.text)
             return None
 
         data = resp.json()
-        # استخراج النص
         return data["results"]["channels"][0]["alternatives"][0]["transcript"]
     except Exception as e:
-        print("Deepgram exception:", e)
+        print("Deepgram error:", e)
         return None
 
 
@@ -511,37 +482,33 @@ def handle_audio(message: telebot.types.Message):
     ensure_user(uid, username)
     users = load_users()
 
-    # حساب المدة واختيار file_id
+    # حساب المدة
     if message.content_type == "voice":
         duration = message.voice.duration or 0
         file_id = message.voice.file_id
-        # ملفات voice في تيليجرام غالباً تكون ogg/opus
-        mimetype = "audio/ogg"
     else:
         duration = message.audio.duration or 0
         file_id = message.audio.file_id
-        # نفترض mp3 إن لم نعرف
-        mimetype = "audio/mpeg"
 
-    used = int(users[uid].get("used", 0))
-    paid = int(users[uid].get("paid", 0))
+    used = users[uid].get("used", 0)
+    paid = users[uid].get("paid", 0)
     available = FREE_LIMIT + paid - used
 
     if duration > available:
         return bot.reply_to(
             message,
             f"❌ وقتك غير كافٍ.\n"
-            f"⏳ المتبقي: {max(0, available)} ثانية = {seconds_to_minutes_str(max(0, available))}.\n"
+            f"⏳ المتبقي: {max(0, available)} ثانية.\n"
             "📄 يمكنك شراء باقة من قسم الاشتراكات."
         )
 
-    wait_msg = bot.reply_to(message, "⏳ جاري التفريغ بواسطة Deepgram…")
+    wait_msg = bot.reply_to(message, "⏳ جاري التفريغ…")
 
     # تحميل الملف من تيليجرام
     try:
         file_info = bot.get_file(file_id)
         url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
-        audio_bytes = requests.get(url, timeout=300).content
+        audio_bytes = requests.get(url, timeout=600).content
     except Exception as e:
         print("Download error:", e)
         return bot.edit_message_text(
@@ -550,11 +517,11 @@ def handle_audio(message: telebot.types.Message):
             wait_msg.message_id,
         )
 
-    # تفريغ بواسطة Deepgram
-    text = transcribe_deepgram(audio_bytes, mimetype=mimetype)
+    # تفريغ عبر Deepgram
+    text = transcribe_deepgram(audio_bytes)
 
-    # ❗ مهم: لا نخصم الوقت إذا فشل التفريغ
     if not text:
+        # لا نخصم أي وقت هنا
         return bot.edit_message_text(
             "❌ لم أستطع تفريغ الصوت. لن يتم خصم أي وقت من رصيدك.\n"
             "🔁 حاول مرة أخرى أو أرسل ملفًا آخر.",
@@ -562,16 +529,15 @@ def handle_audio(message: telebot.types.Message):
             wait_msg.message_id,
         )
 
-    # ✅ هنا فقط نخصم الوقت لأنه تم التفريغ بنجاح
+    # خصم الوقت فقط عند النجاح
     users = load_users()
     users[uid]["used"] = users[uid].get("used", 0) + duration
     save_users(users)
 
     bot.edit_message_text(
-        f"✅ تم التفريغ بنجاح:\n\n"
-        f"{text}\n\n"
-        f"⏱ المدة: {duration} ثانية = {seconds_to_minutes_str(duration)}.\n"
-        f"🔢 المجموع المستخدم حتى الآن: {users[uid]['used']} ثانية = {seconds_to_minutes_str(users[uid]['used'])}.",
+        f"✅ تم التفريغ بنجاح:\n\n{text}\n\n"
+        f"⏱ المدة: {duration} ثانية ≈ {duration / 60.0:.2f} دقيقة.\n"
+        f"🔢 المجموع المستخدم حتى الآن: {seconds_to_minutes_str(users[uid]['used'])}.",
         wait_msg.chat.id,
         wait_msg.message_id,
     )
@@ -580,5 +546,5 @@ def handle_audio(message: telebot.types.Message):
 # ==========================
 # تشغيل البوت
 # ==========================
-print("Bot is running with Deepgram...")
+print("Bot is running...")
 bot.infinity_polling(skip_pending=True, timeout=60)
