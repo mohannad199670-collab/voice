@@ -1,18 +1,46 @@
 import os
 import json
+import uuid
 import requests
 import telebot
 from telebot import types
+
+# Google Cloud
+from google.oauth2 import service_account
+from google.cloud import speech_v1p1beta1 as speech
+from google.cloud import storage
 
 # ==========================
 # المتغيرات من Koyeb
 # ==========================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # مثال: 604494923
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
-if not BOT_TOKEN or not GROQ_API_KEY:
-    raise RuntimeError("❌ يجب ضبط BOT_TOKEN و GROQ_API_KEY في إعدادات Koyeb")
+GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID")
+GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME")
+GCP_SERVICE_ACCOUNT_JSON = os.getenv("GCP_SERVICE_ACCOUNT_JSON")
+
+if not BOT_TOKEN:
+    raise RuntimeError("❌ BOT_TOKEN غير مضبوط في إعدادات Koyeb")
+
+if not (GCP_PROJECT_ID and GCS_BUCKET_NAME and GCP_SERVICE_ACCOUNT_JSON):
+    raise RuntimeError(
+        "❌ يجب ضبط GCP_PROJECT_ID و GCS_BUCKET_NAME و GCP_SERVICE_ACCOUNT_JSON في إعدادات Koyeb"
+    )
+
+# تحميل بيانات الخدمة من الـ JSON المخزَّن في المتغير
+try:
+    service_account_info = json.loads(GCP_SERVICE_ACCOUNT_JSON)
+except Exception as e:
+    raise RuntimeError(f"❌ خطأ في قراءة GCP_SERVICE_ACCOUNT_JSON: {e}")
+
+credentials = service_account.Credentials.from_service_account_info(
+    service_account_info
+)
+
+# عمل Clients لجوجل
+speech_client = speech.SpeechClient(credentials=credentials)
+storage_client = storage.Client(credentials=credentials, project=GCP_PROJECT_ID)
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -112,11 +140,11 @@ def cmd_start(message: telebot.types.Message):
     bot.send_message(
         message.chat.id,
         "👋 أهلاً بك في الأسطورة للتفريغ الصوتي!\n\n"
-        "🎙 يعتمد على Groq – موديل *whisper-large-v3* مع دعم ممتاز للعربية.\n"
+        "🎙 يعتمد الآن على Google Cloud Speech-to-Text.\n"
+        "🎙 يدعم العربية 100%، وملفات طويلة (عبر Google Cloud Storage).\n"
         "🎁 لديك 120 ثانية مجانية للتجربة.\n\n"
         "اختر من الأزرار بالأسفل أو أرسل مقطعًا صوتيًا مباشرة.",
         reply_markup=main_menu(is_admin=is_admin),
-        parse_mode="Markdown",
     )
 
 
@@ -169,7 +197,6 @@ def plan_selected(call: telebot.types.CallbackQuery):
             "username": username,
             "pending_plan": ""
         }
-
     users[uid]["pending_plan"] = str(minutes)
     save_users(users)
 
@@ -240,7 +267,7 @@ def user_settings(message: telebot.types.Message):
 # ==========================
 # لوحة تحكم الأدمن (زر مستقل)
 # ==========================
-ADMIN_STATE = {}  # لحالة إضافة الوقت التفاعلي للأدمن
+ADMIN_STATE: dict[int, dict] = {}  # لحالة إضافة الوقت التفاعلي للأدمن
 
 
 @bot.message_handler(func=lambda m: m.text == "🛠 لوحة التحكم")
@@ -256,6 +283,7 @@ def admin_menu(message: telebot.types.Message):
     bot.send_message(message.chat.id, "🔧 لوحة التحكم:", reply_markup=kb)
 
 
+# زر رجوع
 @bot.message_handler(func=lambda m: m.text == "↩️ رجوع")
 def admin_back(message: telebot.types.Message):
     if message.from_user.id in ADMIN_STATE:
@@ -269,6 +297,7 @@ def admin_back(message: telebot.types.Message):
     )
 
 
+# 📊 الإحصائيات
 @bot.message_handler(func=lambda m: m.text == "📊 الإحصائيات")
 def admin_stats(message: telebot.types.Message):
     if message.from_user.id != ADMIN_ID:
@@ -289,6 +318,7 @@ def admin_stats(message: telebot.types.Message):
     bot.send_message(message.chat.id, text)
 
 
+# 📃 عرض المستخدمين
 @bot.message_handler(func=lambda m: m.text == "📃 عرض المستخدمين")
 def list_users(message: telebot.types.Message):
     if message.from_user.id != ADMIN_ID:
@@ -311,6 +341,7 @@ def list_users(message: telebot.types.Message):
     bot.send_message(message.chat.id, txt)
 
 
+# ➕ إضافة وقت – الخطوة الأولى
 @bot.message_handler(func=lambda m: m.text == "➕ إضافة وقت")
 def ask_user_id(message: telebot.types.Message):
     if message.from_user.id != ADMIN_ID:
@@ -321,21 +352,24 @@ def ask_user_id(message: telebot.types.Message):
     bot.reply_to(message, "🆔 أرسل الآن ID المستخدم المراد إضافة وقت له:")
 
 
+# نظام إضافة الوقت التفاعلي
 @bot.message_handler(func=lambda m: m.from_user.id in ADMIN_STATE, content_types=["text"])
 def process_add_time(message: telebot.types.Message):
     state = ADMIN_STATE[message.from_user.id]
 
+    # STEP 1 → استلام ID
     if state["step"] == 1:
         uid = message.text.strip()
         users = load_users()
         if uid not in users:
             ADMIN_STATE.pop(message.from_user.id)
-            return bot.reply_to(message, "❌ هذا المستخدم غير موجود في قاعدة البيانات!")
+            return bot.reply_to(message, "❌ هذا المستخدم غير موجود في قاعدة البيانات.")
 
         state["uid"] = uid
         state["step"] = 2
         return bot.reply_to(message, "⏱ أرسل عدد الدقائق التي تريد إضافتها:")
 
+    # STEP 2 → استلام الدقائق
     if state["step"] == 2:
         try:
             minutes = int(message.text.strip())
@@ -357,6 +391,7 @@ def process_add_time(message: telebot.types.Message):
             f"إجمالي الوقت المدفوع الآن: {seconds_to_minutes_str(users[uid]['paid'])}.",
         )
 
+        # إزالة الحالة والعودة للوحة التحكم
         ADMIN_STATE.pop(message.from_user.id)
 
         kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -386,12 +421,14 @@ def handle_payment_screenshot(message: telebot.types.Message):
     elif pending_plan == "300":
         plan_text = "باقة 300 دقيقة (20$) – 300 دقيقة"
 
+    # تنبيه المستخدم
     bot.reply_to(
         message,
         "📸 تم استلام لقطة الشاشة بنجاح.\n"
         "📩 سيتم مراجعة الدفع وتفعيل الباقة من قبل الإدارة."
     )
 
+    # إرسال للأدمن
     if ADMIN_ID:
         caption = (
             "💳 إشعار دفع جديد:\n\n"
@@ -412,35 +449,48 @@ def handle_payment_screenshot(message: telebot.types.Message):
 
 
 # ==========================
-# Groq – whisper-large-v3
+# Google Cloud Speech-to-Text + Storage
 # ==========================
-def transcribe_groq(audio_bytes: bytes) -> str | None:
+
+def upload_audio_to_gcs(audio_bytes: bytes, blob_name: str) -> str:
     """
-    تفريغ الصوت عبر Groq – موديل whisper-large-v3
-    مع التركيز على اللغة العربية.
+    يرفع ملف الصوت إلى Google Cloud Storage ويعيد رابط gs://
     """
+    bucket = storage_client.bucket(GCS_BUCKET_NAME)
+    blob = bucket.blob(blob_name)
+    blob.upload_from_string(audio_bytes)
+    return f"gs://{GCS_BUCKET_NAME}/{blob_name}"
 
-    url = "https://api.groq.com/openai/v1/audio/transcriptions"
 
-    files = {
-        "file": ("audio.wav", audio_bytes, "audio/wav"),
-        "model": (None, "whisper-large-v3"),
-        "response_format": (None, "text"),
-        "language": (None, "ar"),  # تركيز على العربية
-    }
+def transcribe_google(gcs_uri: str, encoding_enum) -> str | None:
+    """
+    تفريغ الصوت عبر Google Cloud Speech-to-Text (LongRunningRecognize)
+    يدعم العربية والملفات الطويلة.
+    """
+    audio = speech.RecognitionAudio(uri=gcs_uri)
 
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}"
-    }
+    config = speech.RecognitionConfig(
+        encoding=encoding_enum,
+        language_code="ar",
+        enable_automatic_punctuation=True,
+        model="default",
+    )
 
     try:
-        resp = requests.post(url, headers=headers, files=files, timeout=600)
-        if resp.status_code != 200:
-            print("Groq error status:", resp.status_code, resp.text)
-            return None
-        return resp.text
+        operation = speech_client.long_running_recognize(
+            request={"config": config, "audio": audio}
+        )
+        response = operation.result(timeout=3600)  # حتى ساعة انتظار للملفات الكبيرة
+
+        full_text = []
+        for result in response.results:
+            if result.alternatives:
+                full_text.append(result.alternatives[0].transcript)
+
+        return "\n".join(full_text).strip() if full_text else None
+
     except Exception as e:
-        print("Groq error:", e)
+        print("Google STT error:", e)
         return None
 
 
@@ -463,12 +513,18 @@ def handle_audio(message: telebot.types.Message):
     ensure_user(uid, username)
     users = load_users()
 
+    # حساب المدة
     if message.content_type == "voice":
         duration = message.voice.duration or 0
         file_id = message.voice.file_id
+        encoding_enum = speech.RecognitionConfig.AudioEncoding.OGG_OPUS
+        ext = "ogg"
     else:
         duration = message.audio.duration or 0
         file_id = message.audio.file_id
+        # غالباً MP3 من تيليجرام
+        encoding_enum = speech.RecognitionConfig.AudioEncoding.MP3
+        ext = "mp3"
 
     used = users[uid].get("used", 0)
     paid = users[uid].get("paid", 0)
@@ -482,8 +538,9 @@ def handle_audio(message: telebot.types.Message):
             "📄 يمكنك شراء باقة من قسم الاشتراكات."
         )
 
-    wait_msg = bot.reply_to(message, "⏳ جاري التفريغ…")
+    wait_msg = bot.reply_to(message, "⏳ جاري تحميل الملف وبدء التفريغ…")
 
+    # تحميل الملف من تيليجرام
     try:
         file_info = bot.get_file(file_id)
         url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
@@ -496,9 +553,23 @@ def handle_audio(message: telebot.types.Message):
             wait_msg.message_id,
         )
 
-    text = transcribe_groq(audio_bytes)
+    # رفع الملف إلى GCS
+    try:
+        blob_name = f"telegram/{uid}_{uuid.uuid4().hex}.{ext}"
+        gcs_uri = upload_audio_to_gcs(audio_bytes, blob_name)
+    except Exception as e:
+        print("GCS upload error:", e)
+        return bot.edit_message_text(
+            "❌ حدث خطأ أثناء رفع الملف إلى Google Cloud Storage.",
+            wait_msg.chat.id,
+            wait_msg.message_id,
+        )
+
+    # تفريغ عبر Google STT
+    text = transcribe_google(gcs_uri, encoding_enum)
 
     if not text:
+        # لا نخصم أي وقت هنا
         return bot.edit_message_text(
             "❌ لم أستطع تفريغ الصوت. لن يتم خصم أي وقت من رصيدك.\n"
             "🔁 حاول مرة أخرى أو أرسل ملفًا آخر.",
@@ -506,6 +577,7 @@ def handle_audio(message: telebot.types.Message):
             wait_msg.message_id,
         )
 
+    # خصم الوقت فقط عند النجاح
     users = load_users()
     users[uid]["used"] = users[uid].get("used", 0) + duration
     save_users(users)
