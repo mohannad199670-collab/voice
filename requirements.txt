@@ -1,3 +1,4 @@
 pyTelegramBotAPI
+google-cloud-speech
+google-cloud-storage
 requests
-pydub
