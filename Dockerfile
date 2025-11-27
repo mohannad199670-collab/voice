@@ -1,20 +1,20 @@
-# نستخدم نسخة بايثون 3.11 لأنها مستقرة وتدعم مكتبات الصوت بدون مشاكل
+# نستخدم نسخة بايثون 3.11 لأنها مستقرة وفيها مكتبة الصوت جاهزة
 FROM python:3.11-slim
 
-# تحديث النظام وتثبيت ffmpeg الضروري
+# تنزيل تحديثات النظام وتثبيت FFmpeg الضروري جداً
 RUN apt-get update && \
     apt-get install -y ffmpeg git && \
     rm -rf /var/lib/apt/lists/*
 
-# إعداد مجلد العمل داخل السيرفر
+# تجهيز مجلد العمل
 WORKDIR /app
 
-# نسخ ملف المتطلبات وتثبيتها
+# نسخ ملفات المكتبات وتثبيتها
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # نسخ باقي ملفات البوت
 COPY . .
 
-# أمر تشغيل البوت (تأكد أن اسم ملفك bot.py)
+# أمر تشغيل البوت (تأكد ان اسم ملفك bot.py)
 CMD ["python", "bot.py"]
