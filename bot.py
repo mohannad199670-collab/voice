@@ -426,7 +426,7 @@ def transcribe_deepgram(audio_bytes: bytes) -> str | None:
     }
 
     params = {
-        "model": "nova-2-general",
+        "model": "nova-2",
         "language": "ar",        # 🔒 إجبار اللغة العربية
         "smart_format": "true",
         "punctuate": "true",
